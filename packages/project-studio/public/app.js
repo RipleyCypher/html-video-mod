@@ -97,7 +97,8 @@ function renderToolbar() {
     pickBtn.querySelector('.label').textContent = t ? t.name : p.templateId;
   } else {
     pickBtn.classList.add('empty');
-    pickBtn.querySelector('.label').textContent = '— choose —';
+    // Template is optional — label hints at quick-start, not required step
+    pickBtn.querySelector('.label').textContent = 'Optional · Pick template';
   }
 
   const availableAgents = state.agents.filter(a => a.available);
@@ -340,13 +341,16 @@ function renderComposer() {
   const sendBtn = document.getElementById('btn-send');
   if (!ta) return;
   const availableAgents = state.agents.filter(a => a.available);
-  const ready = !!(p && p.templateId && availableAgents.length > 0);
+  // Composer is ready as soon as there's a project + an agent. Template is OPTIONAL
+  // — agent can synthesize HTML from scratch from the user's prompt + attachments.
+  const ready = !!(p && availableAgents.length > 0);
   ta.disabled = !ready || state.composing;
   sendBtn.disabled = !ready || state.composing;
   ta.placeholder = !p ? 'Pick a project first…'
-    : !p.templateId ? 'Pick a template up top first…'
     : availableAgents.length === 0 ? 'Install Claude Code (claude CLI) to enable chat…'
-    : 'Describe the video — content, names, data, mood…';
+    : !p.templateId
+      ? 'Describe a video — style, content, mood. Or pick a template above for a quick start.'
+      : 'Describe the video — content, names, data, mood…';
 }
 
 function renderFooter() {
@@ -354,7 +358,7 @@ function renderFooter() {
   const fs = document.getElementById('footer-status');
   if (!fs) return;
   if (p) {
-    fs.innerHTML = `<b>${esc(p.name)}</b> · ${p.templateId ? `template <b>${esc(p.templateId)}</b>` : 'no template'} · ${p.status}`;
+    fs.innerHTML = `<b>${esc(p.name)}</b> · ${p.templateId ? `template <b>${esc(p.templateId)}</b>` : '<i>no template</i>'} · ${p.status}`;
   } else {
     fs.textContent = 'no project';
   }
@@ -366,11 +370,12 @@ function renderChatLog() {
   if (!log) return;
   if (!state.messages.length) {
     log.innerHTML = `<div class="chat-empty"><div><div class="ico">💬</div>
-      Tell the agent what to make.<br>The HTML preview on the right updates with each turn.
+      Tell the agent what to make. Drop in style references, paste links, attach a logo —
+      whatever helps.<br>The HTML preview on the right updates with each turn.
       <div class="examples">
-        <b>"Brand outro for Open Design with tagline 'Design that evolves itself'"</b>
-        <b>"Bar chart of OD plugins: Templates 231, Skills 15, Systems 150, Craft 11"</b>
-        <b>"Glitch title saying SYSTEM ONLINE in cyan/magenta"</b>
+        <b>"Warm-grain magazine outro: Open Design — design that evolves itself"</b>
+        <b>"Cyberpunk glitch title saying SYSTEM ONLINE, neon cyan/magenta"</b>
+        <b>"Swiss-grid data card: Templates 231, Skills 15, Systems 150, Craft 11"</b>
       </div>
     </div></div>`;
     return;
@@ -483,14 +488,21 @@ function renderPreview() {
   const stage = document.getElementById('preview-stage');
   if (!stage) return;
   const p = state.selected;
-  if (!p || !p.templateId) {
+  if (!p) {
     stage.innerHTML = `<div class="preview-placeholder"><div><div class="ico">🎞️</div>
-      ${p ? 'Pick a template up top to preview.' : 'Pick a project first.'}</div></div>`;
+      Pick a project first.</div></div>`;
+    return;
+  }
+  // No template + no prior preview → show "send a chat first" placeholder
+  if (!p.templateId && !p.lastPreviewHtmlPath) {
+    stage.innerHTML = `<div class="preview-placeholder"><div><div class="ico">🎞️</div>
+      Send a chat to generate the first HTML.<br>
+      Or pick a template up top for a quick start.</div></div>`;
     return;
   }
   stage.innerHTML = `<div class="preview-frame">
     <iframe id="preview-iframe" sandbox="allow-scripts" src="/preview/${p.id}?t=${Date.now()}"></iframe>
-    <div class="stamp">${esc(p.templateId)}</div>
+    ${p.templateId ? `<div class="stamp">${esc(p.templateId)}</div>` : ''}
   </div>`;
 }
 

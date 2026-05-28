@@ -297,9 +297,7 @@ export async function startStudioServer(ctx: CliContext, port: number): Promise<
         // Re-fetch project after potential addFileAsset side-effects
         const project = await ctx.orchestrator.load(id);
         const tmpl = project.templateId ? ctx.templates.get(project.templateId) : null;
-        if (!tmpl) {
-          return json(res, 400, { error: 'pick a template first' });
-        }
+        // No template required — agent can synthesize from scratch when none picked.
 
         const agentId = project.agentId ?? 'claude';
         const agentDef = findAgent(agentId);
@@ -319,16 +317,19 @@ export async function startStudioServer(ctx: CliContext, port: number): Promise<
         });
         MESSAGES.set(id, history);
 
-        // Compose prompt
-        const exampleHtmlPath = join(tmpl.__dir!, tmpl.source_entry);
-        const exampleHtml = existsSync(exampleHtmlPath)
-          ? await readFile(exampleHtmlPath, 'utf8')
-          : '';
+        // Compose prompt — template-aware OR template-free
         const projectDir = await ctx.projects.ensureDir(id);
         const priorHtmlPath = join(projectDir, 'preview.html');
         const priorHtml = existsSync(priorHtmlPath)
           ? await readFile(priorHtmlPath, 'utf8')
           : '';
+        let exampleHtml = '';
+        if (tmpl) {
+          const exampleHtmlPath = join(tmpl.__dir!, tmpl.source_entry);
+          if (existsSync(exampleHtmlPath)) {
+            exampleHtml = await readFile(exampleHtmlPath, 'utf8');
+          }
+        }
 
         const fullPrompt = buildHtmlGenerationPrompt({
           tmpl,
@@ -600,7 +601,7 @@ const MESSAGES = new Map<string, ChatMessage[]>();
 // `Attachment` is declared above (at the buildHtmlGenerationPrompt section)
 
 interface BuildPromptArgs {
-  tmpl: import('@html-video/core').TemplateMetadata;
+  tmpl: import('@html-video/core').TemplateMetadata | null;
   exampleHtml: string;
   priorHtml: string;
   history: ChatMessage[];
@@ -637,27 +638,48 @@ function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
   const baseHtml = priorHtml && priorHtml !== exampleHtml ? priorHtml : exampleHtml;
   const isFirstTurn = history.filter((m) => m.role === 'user').length <= 1;
 
+  // Heuristic: a "concrete" first turn (≥ 8 words OR mentions a brand/product/topic
+  // word) gets the direct-draft path. A short / vague turn gets the explorer path.
+  const concrete =
+    userText.trim().split(/\s+/).length >= 8 ||
+    /brand|outro|intro|launch|demo|video|chart|data|product|tagline/i.test(userText);
+
   const parts: string[] = [];
 
-  parts.push(`# Role`);
-  parts.push(
-    `You are a Hyperframes video creation collaborator. The user wants ONE self-contained HTML file that opens with animation and is ready to be recorded into an MP4.`,
-  );
-  parts.push('');
+  if (concrete) {
+    // === Direct-draft path: minimal preamble, no decision tree, just go ===
+    parts.push(`Create an HTML video file based on the user's request below.`);
+    parts.push('');
+  } else {
+    // === Explorer path: agent may ask questions or offer hv-options ===
+    parts.push(`# Role`);
+    parts.push(
+      `You are a Hyperframes video creation collaborator. The user wants ONE self-contained HTML file that opens with animation and is ready to be recorded into an MP4.`,
+    );
+    parts.push('');
+    parts.push(`# Behaviour`);
+    parts.push(`- If the user's request is concrete enough to make a good first draft, generate the HTML directly (see Output rules below).`);
+    parts.push(`- If the request is too vague, ask 1–3 short, sharp questions to surface what's missing. Pick whichever 1–3 things are blocking *this* particular project — don't run a fixed audience/platform/style checklist.`);
+    parts.push(`- When the user attaches files, use them: images / video links as visual style references, logos / photos as actual assets to embed, data files as content, text files as copy.`);
+    parts.push(`- When the user describes a style in words (e.g. "warm grain magazine", "cyberpunk glitch", "Swiss minimalist"), translate that into concrete CSS.`);
+    parts.push(`- Keep chat replies brief. The HTML is the artefact.`);
+    parts.push('');
+  }
 
-  parts.push(`# Behaviour`);
-  parts.push(`- If the user's request is concrete enough to make a good first draft, generate the HTML directly (see Output rules below).`);
-  parts.push(`- If the request is too vague, ask 1–3 short, sharp questions to surface what's missing. Use your judgement: don't ask a fixed checklist of audience/platform/style/tone — pick whichever 1–3 things are blocking *this* particular project.`);
-  parts.push(`- When the user attaches files, use them: images / video links as visual style references, logos / photos as actual assets to embed, data files as content, text files as copy.`);
-  parts.push(`- When you have enough to draft, you may optionally summarise a one-paragraph creative brief and check in ("shall I draft now?"). Skip the brief if the user is clearly ready.`);
-  parts.push(`- Don't perform a fixed onboarding script. Be a thoughtful collaborator, not a form.`);
-  parts.push(`- Keep chat replies brief. The HTML is the artefact.`);
-  parts.push('');
-
-  parts.push(`# Template currently selected`);
-  parts.push(`${tmpl.name} (${tmpl.category}) — ${tmpl.description}`);
-  parts.push(`The template's visual signature (colors, animation timing, layout) should be preserved unless the user explicitly asks for a deviation.`);
-  parts.push('');
+  if (tmpl) {
+    parts.push(`# Template currently selected`);
+    parts.push(`${tmpl.name} (${tmpl.category}) — ${tmpl.description}`);
+    parts.push(`The template's visual signature (colors, animation timing, layout) should be preserved unless the user explicitly asks for a deviation.`);
+    parts.push('');
+  } else {
+    parts.push(`# No template — write from scratch`);
+    parts.push(`The user has NOT picked a template. You're free to design the visual style yourself, guided by:`);
+    parts.push(`  · the user's description in plain language ("warm grain magazine", "neon cyberpunk", "Swiss grid", etc)`);
+    parts.push(`  · any image / link attachments they provide as style references`);
+    parts.push(`  · any prior preview HTML below (iterate on it instead of starting over)`);
+    parts.push(`Hyperframes-style HTML conventions still apply: full-bleed 1920×1080, opens with an animation timeline, inline CSS+JS, no build step. Use Tailwind CDN if you want utility classes; use GSAP CDN if you want richer motion. Keep it ONE complete <!doctype html>...</html> document.`);
+    parts.push('');
+  }
 
   if (attachments.length > 0) {
     parts.push(`# Attachments in this turn`);
@@ -668,11 +690,17 @@ function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
     parts.push('');
   }
 
-  parts.push(`# Source HTML (the current preview state)`);
-  parts.push('```html');
-  parts.push(baseHtml.slice(0, 6000));
-  parts.push('```');
-  parts.push('');
+  if (baseHtml) {
+    parts.push(`# Source HTML (the current preview state)`);
+    parts.push('```html');
+    parts.push(baseHtml.slice(0, 6000));
+    parts.push('```');
+    parts.push('');
+  } else {
+    parts.push(`# Source HTML`);
+    parts.push(`(nothing yet — this will be the first draft)`);
+    parts.push('');
+  }
 
   const recentUserTurns = history
     .filter((m) => m.role === 'user')
@@ -684,46 +712,42 @@ function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
     parts.push('');
   }
 
-  parts.push(`# Latest user message`);
+  parts.push(`# User message`);
   parts.push(userText);
-  if (isFirstTurn) {
-    parts.push('');
-    parts.push(`(This is the first turn for this project. If the message is concrete enough, just draft. Otherwise ask 1–3 questions to surface what's missing.)`);
-  }
   parts.push('');
 
-  parts.push(`# Output rules (only when you decide to draft HTML)`);
-  parts.push(`- Reply with ONE complete HTML document inside a single \`\`\`html\`\`\` fenced code block.`);
-  parts.push(`- Start with \`<!doctype html>\` and end with \`</html>\`.`);
-  parts.push(`- Inline all CSS and JS (no external imports beyond CDN scripts already in the source).`);
-  parts.push(`- Mark every user-visible text node with \`data-hv-text="<short-key>"\` (e.g. \`brand_name\`, \`tagline\`, \`headline\`, \`item_1\`, \`cta\`). Preserve any existing keys across rewrites.`);
-  parts.push(`- No explanation outside the code block when you draft.`);
-  parts.push('');
-  parts.push(`# When you don't draft this turn`);
-  parts.push(`- Reply in plain conversational text. Markdown is rendered: use **bold**, lists, and headings to keep replies readable.`);
-  parts.push(`- Be concise.`);
-  parts.push('');
-  parts.push(`# Multiple-choice question format (RECOMMENDED for short option sets)`);
-  parts.push(`When a question has a small set of natural options (2–6), present it as a clickable card.`);
-  parts.push(`Emit a fenced code block with the language tag "hv-options" containing valid JSON with this shape:`);
-  parts.push('');
-  parts.push(`  { "question": "...", "options": [{ "label": "...", "hint": "..." }, ...], "allow_freeform": true }`);
-  parts.push('');
-  parts.push(`Rules:`);
-  parts.push(`- Use 2–6 options. If a question is genuinely open-ended, ask in plain prose instead.`);
-  parts.push(`- Each option label is short (≤ 30 chars). \`hint\` is optional, one clarifying line.`);
-  parts.push(`- Concrete, distinct options. Don't invent choices the user wouldn't realistically pick.`);
-  parts.push(`- The hv-options block must be the only block in that turn (markdown preamble above is fine; no prose after).`);
-  parts.push(`- Set \`allow_freeform: true\` when the user might want a custom answer.`);
-  parts.push(`- Skip this format when there's no clean small set; just ask in prose.`);
-  parts.push('');
-  parts.push(`## Avoid template-name tunnel vision`);
-  parts.push(`Don't let the template's name (e.g. "Logo Outro Frame") force every option into that single use case.`);
-  parts.push(`Templates are visual skeletons — users repurpose them. A "Logo Outro" template can also become an opener, a 30-second product teaser, a recurring motion brand block, or a full short-form video. So when you offer choices about scope or use case, include at least one option that opens the door wider:`);
-  parts.push(`- "Use this as the visual style for a longer / full-length video"`);
-  parts.push(`- "Series of short videos sharing this style"`);
-  parts.push(`- "Adapt the style to a completely different scenario"`);
-  parts.push(`Pick whichever is most likely given the user's signal. The point: never force the user to stay inside the template's literal name.`);
+  if (concrete) {
+    // Direct-draft path: terse output rules, no branching = claude doesn't stall
+    parts.push(`Output rules:`);
+    parts.push(`- Reply with one complete HTML document inside a fenced html code block.`);
+    parts.push(`- Inline all CSS and JS. CDN imports are fine.`);
+    parts.push(`- Tag every user-visible text node with attribute data-hv-text set to a short stable key (brand_name, tagline, headline, item_1, cta, etc).`);
+    parts.push(`- No prose outside the code block.`);
+  } else {
+    if (isFirstTurn) {
+      parts.push(`(This is the first turn. If the message is concrete enough, just draft. Otherwise ask 1–3 questions to surface what's missing — or use the multiple-choice format below.)`);
+      parts.push('');
+    }
+    parts.push(`# When you decide to draft HTML`);
+    parts.push(`- Reply with one complete HTML document inside a fenced html code block.`);
+    parts.push(`- Inline all CSS and JS. CDN imports are fine.`);
+    parts.push(`- Tag every user-visible text node with data-hv-text set to a short stable key (brand_name, tagline, headline, item_1, cta). Preserve existing keys.`);
+    parts.push(`- No prose outside the code block.`);
+    parts.push('');
+    parts.push(`# When you ask questions instead`);
+    parts.push(`Reply in plain conversational text. Markdown renders (**bold**, lists, headings).`);
+    parts.push('');
+    parts.push(`# Multiple-choice question format`);
+    parts.push(`When a question has 2–6 natural options, emit a fenced code block whose language tag is hv-options. Body is JSON:`);
+    parts.push(`  { "question": "...", "options": [{ "label": "...", "hint": "..." }, ...], "allow_freeform": true }`);
+    parts.push(`Rules: 2–6 options, each label ≤ 30 chars, distinct, the only block in that turn, allow_freeform:true when custom answers are useful.`);
+
+    if (tmpl) {
+      parts.push('');
+      parts.push(`## Avoid template-name tunnel vision`);
+      parts.push(`Don't let the template's name force every option into one use case. Templates are visual skeletons; users repurpose them. Include at least one broader-scope option when offering choices: a longer/full video, a series, or a different scenario.`);
+    }
+  }
 
   return parts.join('\n');
 }
