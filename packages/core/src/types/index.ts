@@ -286,6 +286,31 @@ export interface FrameRecord {
   order: number;
 }
 
+/**
+ * v0.9: project-level soundtrack — one background music track + one narration
+ * track mixed into the exported MP4. Both reference an entry in `assets[]`
+ * (type 'audio'); this struct only holds the ids + mix preferences, so the
+ * audio bytes live in the normal asset store. Per-frame audio is a v2 concern.
+ */
+export interface ProjectSoundtrack {
+  /** asset.id of the background-music track (type 'audio'), if generated */
+  musicAssetId?: string;
+  /** asset.id of the narration / voiceover track, if generated */
+  narrationAssetId?: string;
+  /** Background-music gain in dB applied at mux time (default -18, pushed under voice) */
+  musicVolumeDb?: number;
+  /** Narration gain in dB (default 0) */
+  narrationVolumeDb?: number;
+  /** Last music style prompt used — kept so the UI can show / re-run it */
+  musicPrompt?: string;
+  /** Last narration text used */
+  narrationText?: string;
+  /** Optional music fade-in seconds at the start of the video */
+  fadeInSec?: number;
+  /** Optional music fade-out seconds at the end of the video */
+  fadeOutSec?: number;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -316,6 +341,8 @@ export interface Project {
    * Empty for single-frame fast-path projects.
    */
   frames?: FrameRecord[];
+  /** v0.9: optional background music + narration mixed into the export. */
+  soundtrack?: ProjectSoundtrack;
   createdAt: string;
   updatedAt: string;
 }

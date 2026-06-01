@@ -13,3 +13,9 @@ export type {
   CreateProjectInput,
   ProjectOrchestratorDeps,
 } from './project.js';
+export {
+  resolveMinimaxCredentials,
+  generateTts,
+  generateMusic,
+} from './minimax.js';
+export type { MinimaxCredentials, MinimaxAudioResult } from './minimax.js';

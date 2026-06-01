@@ -107,6 +107,28 @@ export class ProjectOrchestrator {
     return project;
   }
 
+  /**
+   * Store generated audio bytes (MP3 from MiniMax) as a project asset and
+   * return the created Asset so the caller can reference it in `soundtrack`.
+   * Unlike addFileAsset, this does NOT downgrade status — attaching a
+   * soundtrack to an already-previewed video shouldn't invalidate the render.
+   */
+  async addBufferAsset(
+    projectId: string,
+    bytes: Buffer,
+    ext: string,
+    userCaption?: string,
+  ): Promise<{ project: Project; asset: Asset }> {
+    await this.deps.projects.ensureDir(projectId);
+    const project = await this.deps.projects.load(projectId);
+    const asset = await this.deps.assets.addBufferAsset(projectId, bytes, ext, [], userCaption);
+    if (!project.assets.find((a) => a.id === asset.id)) {
+      project.assets.push(asset);
+    }
+    await this.deps.projects.save(project);
+    return { project, asset };
+  }
+
   async removeAsset(projectId: string, assetId: string): Promise<Project> {
     const project = await this.deps.projects.load(projectId);
     project.assets = project.assets.filter((a) => a.id !== assetId);
@@ -374,6 +396,8 @@ export class ProjectOrchestrator {
       }
 
       await concatFramesWithFfmpeg(frameMp4s, outputPath, projectDir);
+      const totalDur = ordered.reduce((s, f) => s + (f.durationSec || 0), 0);
+      await this.applySoundtrack(project, outputPath, totalDur, args.onProgress);
       project.lastOutputMp4Path = outputPath;
       project.status = 'rendered';
       await this.deps.projects.save(project);
@@ -405,10 +429,49 @@ export class ProjectOrchestrator {
         ...(args.signal !== undefined && { signal: args.signal }),
       },
     );
+    await this.applySoundtrack(project, outputPath, undefined, args.onProgress);
     project.lastOutputMp4Path = outputPath;
     project.status = 'rendered';
     await this.deps.projects.save(project);
     return { project, outputPath };
+  }
+
+  /**
+   * If the project has a soundtrack (music and/or narration), mux it into the
+   * just-rendered video at `outputPath`. Renders to a temp file then renames
+   * over the original. No-op when there's no soundtrack. Audio generation
+   * never depends on ffmpeg — only this export-time mux does.
+   */
+  private async applySoundtrack(
+    project: Project,
+    outputPath: string,
+    videoDurationSec: number | undefined,
+    onProgress?: (pct: number, stage: string) => void,
+  ): Promise<void> {
+    const st = project.soundtrack;
+    if (!st || (!st.musicAssetId && !st.narrationAssetId)) return;
+
+    const findPath = (id?: string): string | undefined =>
+      id ? project.assets.find((a) => a.id === id)?.path : undefined;
+    const musicPath = findPath(st.musicAssetId);
+    const narrationPath = findPath(st.narrationAssetId);
+    if (!musicPath && !narrationPath) return; // referenced assets are gone
+
+    onProgress?.(99, 'mixing audio');
+    const { rename } = await import('node:fs/promises');
+    const tmpOut = `${outputPath}.muxed.mp4`;
+    await muxAudioWithFfmpeg({
+      videoPath: outputPath,
+      outputPath: tmpOut,
+      ...(musicPath !== undefined && { musicPath }),
+      ...(narrationPath !== undefined && { narrationPath }),
+      ...(st.musicVolumeDb !== undefined && { musicVolumeDb: st.musicVolumeDb }),
+      ...(st.narrationVolumeDb !== undefined && { narrationVolumeDb: st.narrationVolumeDb }),
+      ...(st.fadeInSec !== undefined && { fadeInSec: st.fadeInSec }),
+      ...(st.fadeOutSec !== undefined && { fadeOutSec: st.fadeOutSec }),
+      ...(videoDurationSec !== undefined && { videoDurationSec }),
+    });
+    await rename(tmpOut, outputPath);
   }
 }
 
@@ -481,6 +544,104 @@ async function concatFramesWithFfmpeg(
             `ffmpeg concat exited with code ${code}: ${stderr.slice(-2000)}`,
           ),
         );
+    });
+  });
+}
+
+/**
+ * Mix a background-music track and/or a narration track into a (silent) video
+ * file, writing the result to `outputPath`. Video is stream-copied (no
+ * re-encode); audio is encoded to AAC. Music is ducked under narration via a
+ * volume offset, optional fade in/out is applied to the music, and `-shortest`
+ * keeps the result aligned to the video length.
+ *
+ * `videoPath` and `outputPath` must differ. Throws HtmlVideoError on ffmpeg
+ * failure; a missing ffmpeg yields the same friendly hint as concat.
+ */
+async function muxAudioWithFfmpeg(args: {
+  videoPath: string;
+  outputPath: string;
+  musicPath?: string;
+  narrationPath?: string;
+  musicVolumeDb?: number;
+  narrationVolumeDb?: number;
+  fadeInSec?: number;
+  fadeOutSec?: number;
+  videoDurationSec?: number;
+}): Promise<void> {
+  const { spawn } = await import('node:child_process');
+  const hasMusic = !!args.musicPath;
+  const hasNarration = !!args.narrationPath;
+  if (!hasMusic && !hasNarration) return; // nothing to mix
+
+  const musicVol = args.musicVolumeDb ?? -18;
+  const narrVol = args.narrationVolumeDb ?? 0;
+  const fadeIn = args.fadeInSec ?? 0;
+  const fadeOut = args.fadeOutSec ?? 0;
+
+  // Inputs: [0] video, then music / narration in order.
+  const inputs: string[] = ['-i', args.videoPath];
+  let musicIdx = -1;
+  let narrIdx = -1;
+  let next = 1;
+  if (hasMusic) { inputs.push('-i', args.musicPath!); musicIdx = next++; }
+  if (hasNarration) { inputs.push('-i', args.narrationPath!); narrIdx = next++; }
+
+  // Build a filter graph producing a single [aout] label.
+  const filters: string[] = [];
+  const mixLabels: string[] = [];
+  if (hasMusic) {
+    let chain = `[${musicIdx}:a]volume=${musicVol}dB`;
+    if (fadeIn > 0) chain += `,afade=t=in:st=0:d=${fadeIn}`;
+    // Fade-out only when we know where the end is.
+    if (fadeOut > 0 && args.videoDurationSec && args.videoDurationSec > fadeOut) {
+      chain += `,afade=t=out:st=${(args.videoDurationSec - fadeOut).toFixed(2)}:d=${fadeOut}`;
+    }
+    chain += '[bg]';
+    filters.push(chain);
+    mixLabels.push('[bg]');
+  }
+  if (hasNarration) {
+    filters.push(`[${narrIdx}:a]volume=${narrVol}dB[vo]`);
+    mixLabels.push('[vo]');
+  }
+  if (mixLabels.length === 2) {
+    filters.push(`${mixLabels[0]}${mixLabels[1]}amix=inputs=2:duration=longest:dropout_transition=0[aout]`);
+  } else {
+    // single source → relabel to [aout]
+    filters.push(`${mixLabels[0]}anull[aout]`);
+  }
+
+  const ffArgs = [
+    '-y',
+    ...inputs,
+    '-filter_complex', filters.join(';'),
+    '-map', '0:v',
+    '-map', '[aout]',
+    '-c:v', 'copy',
+    '-c:a', 'aac',
+    '-b:a', '192k',
+    '-shortest',
+    args.outputPath,
+  ];
+
+  await new Promise<void>((resolveFn, reject) => {
+    const proc = spawn('ffmpeg', ffArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stderr = '';
+    proc.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf8'); });
+    proc.on('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'ENOENT') {
+        reject(new HtmlVideoError(
+          'render-failed',
+          'ffmpeg not found on PATH. Install with `brew install ffmpeg` (macOS) or your platform equivalent.',
+        ));
+      } else {
+        reject(err);
+      }
+    });
+    proc.on('exit', (code: number | null) => {
+      if (code === 0) resolveFn();
+      else reject(new HtmlVideoError('render-failed', `ffmpeg audio mux exited with code ${code}: ${stderr.slice(-2000)}`));
     });
   });
 }

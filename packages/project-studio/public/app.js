@@ -473,6 +473,30 @@ function renderMain() {
             <span class="grow"></span>
             <button class="reload-btn" id="btn-reload">${t('preview.reload')}</button>
           </div>
+          <details class="soundtrack-panel" id="soundtrack-panel">
+            <summary>${t('soundtrack.title')}</summary>
+            <div class="soundtrack-body">
+              <p class="soundtrack-hint">${t('soundtrack.hint')}</p>
+              <label class="soundtrack-field">
+                <span>${t('soundtrack.music_label')}</span>
+                <textarea id="st-music-prompt" rows="2" placeholder="${t('soundtrack.music_placeholder')}"></textarea>
+              </label>
+              <label class="soundtrack-field">
+                <span>${t('soundtrack.narration_label')}</span>
+                <textarea id="st-narration-text" rows="2" placeholder="${t('soundtrack.narration_placeholder')}"></textarea>
+              </label>
+              <div class="soundtrack-vols">
+                <label>${t('soundtrack.music_volume')} <input type="range" id="st-music-vol" min="-40" max="0" value="-18" /><b id="st-music-vol-val">-18 dB</b></label>
+                <label>${t('soundtrack.narration_volume')} <input type="range" id="st-narration-vol" min="-20" max="6" value="0" /><b id="st-narration-vol-val">0 dB</b></label>
+              </div>
+              <div class="soundtrack-actions">
+                <button class="st-generate" id="btn-st-generate">${t('soundtrack.generate')}</button>
+                <button class="st-clear" id="btn-st-clear">${t('soundtrack.clear')}</button>
+                <span class="st-status" id="st-status"></span>
+              </div>
+              <div class="soundtrack-preview" id="st-preview"></div>
+            </div>
+          </details>
         </section>
 
         <section class="text-pane">
@@ -524,7 +548,136 @@ function renderMain() {
     document.getElementById('file-input').onchange = (e) => addAttachments([...e.target.files]);
     wireDragAndPaste();
     document.getElementById('btn-reload').onclick = () => { reloadPreview(); refreshTextFields(); };
+    wireSoundtrackPanel();
   }
+}
+
+/**
+ * Soundtrack panel: generate MiniMax music + narration, stream SSE progress,
+ * preview the resulting MP3s. The generated tracks are stored on the project's
+ * soundtrack and mixed in automatically at export time.
+ */
+function wireSoundtrackPanel() {
+  const panel = document.getElementById('soundtrack-panel');
+  if (!panel) return;
+  const musicPrompt = document.getElementById('st-music-prompt');
+  const narrationText = document.getElementById('st-narration-text');
+  const musicVol = document.getElementById('st-music-vol');
+  const narrationVol = document.getElementById('st-narration-vol');
+  const musicVolVal = document.getElementById('st-music-vol-val');
+  const narrationVolVal = document.getElementById('st-narration-vol-val');
+  const genBtn = document.getElementById('btn-st-generate');
+  const clearBtn = document.getElementById('btn-st-clear');
+  const statusEl = document.getElementById('st-status');
+  const previewEl = document.getElementById('st-preview');
+
+  // Restore previously generated soundtrack (prompt/text + audio previews).
+  const st = state.selected?.soundtrack;
+  if (st) {
+    if (st.musicPrompt) musicPrompt.value = st.musicPrompt;
+    if (st.narrationText) narrationText.value = st.narrationText;
+    if (typeof st.musicVolumeDb === 'number') musicVol.value = String(st.musicVolumeDb);
+    if (typeof st.narrationVolumeDb === 'number') narrationVol.value = String(st.narrationVolumeDb);
+    renderSoundtrackPreview(st);
+  }
+  musicVolVal.textContent = `${musicVol.value} dB`;
+  narrationVolVal.textContent = `${narrationVol.value} dB`;
+  musicVol.oninput = () => { musicVolVal.textContent = `${musicVol.value} dB`; };
+  narrationVol.oninput = () => { narrationVolVal.textContent = `${narrationVol.value} dB`; };
+
+  clearBtn.onclick = async () => {
+    if (!state.selected) return;
+    await fetch(`/api/projects/${state.selected.id}/soundtrack`, { method: 'DELETE' });
+    musicPrompt.value = '';
+    narrationText.value = '';
+    previewEl.innerHTML = '';
+    statusEl.textContent = '';
+    if (state.selected) delete state.selected.soundtrack;
+  };
+
+  genBtn.onclick = async () => {
+    if (!state.selected) return;
+    const mp = musicPrompt.value.trim();
+    const nt = narrationText.value.trim();
+    if (!mp && !nt) { statusEl.textContent = t('soundtrack.empty'); return; }
+
+    genBtn.disabled = true;
+    clearBtn.disabled = true;
+    statusEl.textContent = t('soundtrack.starting');
+    previewEl.innerHTML = '';
+
+    const payload = {};
+    if (mp) payload.music = { prompt: mp, instrumental: true, volumeDb: Number(musicVol.value) };
+    if (nt) payload.narration = { text: nt, volumeDb: Number(narrationVol.value) };
+
+    let res;
+    try {
+      res = await fetch(`/api/projects/${state.selected.id}/generate-audio`, {
+        method: 'POST',
+        headers: { accept: 'text/event-stream', 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    } catch (e) {
+      statusEl.textContent = t('soundtrack.failed', { message: (e?.message ?? e) });
+      genBtn.disabled = false; clearBtn.disabled = false;
+      return;
+    }
+    if (!res.ok || !res.body) {
+      statusEl.textContent = t('soundtrack.failed', { message: `HTTP ${res.status}` });
+      genBtn.disabled = false; clearBtn.disabled = false;
+      return;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const events = buf.split('\n\n');
+        buf = events.pop() ?? '';
+        for (const line of events) {
+          if (!line.startsWith('data: ')) continue;
+          let ev;
+          try { ev = JSON.parse(line.slice(6)); } catch { continue; }
+          if (ev.type === 'audio_progress') {
+            statusEl.textContent = ev.stage === 'music'
+              ? t('soundtrack.progress_music')
+              : t('soundtrack.progress_narration');
+          } else if (ev.type === 'audio_done') {
+            statusEl.textContent = t('soundtrack.done');
+            if (ev.project) state.selected = ev.project;
+            renderSoundtrackPreview(ev.soundtrack);
+          } else if (ev.type === 'audio_failed') {
+            statusEl.textContent = t('soundtrack.failed', { message: ev.message });
+          }
+        }
+      }
+    } catch (e) {
+      statusEl.textContent = t('soundtrack.failed', { message: (e?.message ?? e) });
+    } finally {
+      genBtn.disabled = false;
+      clearBtn.disabled = false;
+    }
+  };
+}
+
+function renderSoundtrackPreview(soundtrack) {
+  const previewEl = document.getElementById('st-preview');
+  if (!previewEl || !soundtrack || !state.selected) return;
+  const assets = state.selected.assets || [];
+  const srcFor = (id) => {
+    const a = assets.find((x) => x.id === id);
+    return a?.path ? `/asset?path=${encodeURIComponent(a.path)}` : null;
+  };
+  const blocks = [];
+  const musicSrc = soundtrack.musicAssetId && srcFor(soundtrack.musicAssetId);
+  const narrSrc = soundtrack.narrationAssetId && srcFor(soundtrack.narrationAssetId);
+  if (musicSrc) blocks.push(`<div class="st-track"><span>${t('soundtrack.music_ready')}</span><audio controls src="${musicSrc}"></audio></div>`);
+  if (narrSrc) blocks.push(`<div class="st-track"><span>${t('soundtrack.narration_ready')}</span><audio controls src="${narrSrc}"></audio></div>`);
+  previewEl.innerHTML = blocks.join('');
 }
 
 // ============== composer attachments ==============

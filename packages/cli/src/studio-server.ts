@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import type { CliContext } from './context.js';
-import { AssetStore } from '@html-video/core';
+import { AssetStore, resolveMinimaxCredentials, generateTts, generateMusic } from '@html-video/core';
 import { detectAll, findAgent, spawnAgent } from '@html-video/runtime';
 
 interface StudioHandle {
@@ -337,6 +337,116 @@ export async function startStudioServer(ctx: CliContext, port: number): Promise<
         }
         res.end();
         return;
+      }
+
+      // Generate soundtrack: background music (MiniMax music_generation) and/or
+      // narration (MiniMax t2a_v2). Streams SSE progress like export. The
+      // generated MP3s are stored as project assets; their ids land in
+      // project.soundtrack so exportMp4 mixes them in. Generation itself does
+      // NOT need ffmpeg — only the export-time mux does.
+      const genAudioMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/generate-audio$/);
+      if (genAudioMatch && genAudioMatch[1] && m === 'POST') {
+        const projectId = genAudioMatch[1];
+        const body = (await readBody(req)) as {
+          music?: { prompt?: string; instrumental?: boolean; volumeDb?: number };
+          narration?: { text?: string; voiceId?: string; volumeDb?: number; languageBoost?: string };
+          fadeInSec?: number;
+          fadeOutSec?: number;
+        };
+        res.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache',
+          connection: 'keep-alive',
+        });
+        const sse = (obj: unknown) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+        try {
+          sse({ type: 'audio_started' });
+          const creds = resolveMinimaxCredentials();
+          if (!creds) {
+            sse({
+              type: 'audio_failed',
+              message:
+                'MiniMax API key not configured — set OD_MINIMAX_API_KEY (or MINIMAX_API_KEY) in the environment.',
+            });
+            res.end();
+            return;
+          }
+
+          const project = await ctx.orchestrator.load(projectId);
+          const soundtrack = { ...(project.soundtrack ?? {}) };
+          const wantMusic = !!body.music?.prompt?.trim();
+          const wantNarration = !!body.narration?.text?.trim();
+          if (!wantMusic && !wantNarration) {
+            sse({ type: 'audio_failed', message: 'Nothing to generate — provide a music prompt and/or narration text.' });
+            res.end();
+            return;
+          }
+
+          if (wantMusic) {
+            sse({ type: 'audio_progress', stage: 'music', message: 'generating background music…' });
+            const music = await generateMusic({
+              prompt: body.music!.prompt!.trim(),
+              instrumental: body.music!.instrumental ?? true,
+              creds,
+            });
+            const { asset } = await ctx.orchestrator.addBufferAsset(
+              projectId,
+              music.bytes,
+              music.ext,
+              `background music · ${body.music!.prompt!.trim().slice(0, 60)}`,
+            );
+            soundtrack.musicAssetId = asset.id;
+            soundtrack.musicPrompt = body.music!.prompt!.trim();
+            if (body.music!.volumeDb !== undefined) soundtrack.musicVolumeDb = body.music!.volumeDb;
+            sse({ type: 'audio_progress', stage: 'music', message: music.providerNote, asset_id: asset.id });
+          }
+
+          if (wantNarration) {
+            sse({ type: 'audio_progress', stage: 'narration', message: 'generating narration…' });
+            const nar = await generateTts({
+              text: body.narration!.text!.trim(),
+              ...(body.narration!.voiceId !== undefined && { voiceId: body.narration!.voiceId }),
+              ...(body.narration!.languageBoost !== undefined && { languageBoost: body.narration!.languageBoost }),
+              creds,
+            });
+            const { asset } = await ctx.orchestrator.addBufferAsset(
+              projectId,
+              nar.bytes,
+              nar.ext,
+              `narration · ${body.narration!.text!.trim().slice(0, 60)}`,
+            );
+            soundtrack.narrationAssetId = asset.id;
+            soundtrack.narrationText = body.narration!.text!.trim();
+            if (body.narration!.volumeDb !== undefined) soundtrack.narrationVolumeDb = body.narration!.volumeDb;
+            sse({ type: 'audio_progress', stage: 'narration', message: nar.providerNote, asset_id: asset.id });
+          }
+
+          if (body.fadeInSec !== undefined) soundtrack.fadeInSec = body.fadeInSec;
+          if (body.fadeOutSec !== undefined) soundtrack.fadeOutSec = body.fadeOutSec;
+
+          // Persist soundtrack onto the project (reload to avoid clobbering the
+          // asset pushes addBufferAsset already saved).
+          const fresh = await ctx.orchestrator.load(projectId);
+          fresh.soundtrack = soundtrack;
+          await ctx.projects.save(fresh);
+          sse({ type: 'audio_done', project: fresh, soundtrack });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`[studio:generate-audio] proj=${projectId} failed: ${msg}\n`);
+          sse({ type: 'audio_failed', message: msg });
+        }
+        res.end();
+        return;
+      }
+
+      // Clear a project's soundtrack (keeps the asset files, just drops the
+      // references so the next export has no audio).
+      const clearAudioMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/soundtrack$/);
+      if (clearAudioMatch && clearAudioMatch[1] && m === 'DELETE') {
+        const project = await ctx.orchestrator.load(clearAudioMatch[1]);
+        delete project.soundtrack;
+        await ctx.projects.save(project);
+        return json(res, 200, { project });
       }
 
       // Reveal an exported file in the OS file browser. macOS: `open -R`
@@ -1583,7 +1693,7 @@ function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
         {
           key: 'frame_count', label: '帧数', kind: 'buttons', required: true,
           default: defaults.frame_count,
-          options: ['1', '2', '3', '4', '5', '6'].map((v) => ({ value: v, label: v })),
+          options: ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10'].map((v) => ({ value: v, label: v })),
         },
       ],
       allow_attachments: false,
@@ -1679,10 +1789,10 @@ function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
     }
     p.push(`Constraints: full-bleed ${resolution}, opens with an animation timeline, inline CSS + JS, single complete <!doctype html>...</html> document(s). CDN imports (Tailwind, GSAP) are fine. Tag every visible text node with data-hv-text set to a stable key (brand_name, headline, item_1, cta…). No prose outside code blocks.`);
     p.push('');
-    // Frame-count safety: claude --print starts truncating / stalling around
-    // 8+ frames worth of HTML. Cap multi-frame generation to 6, tell the
-    // model so it can plan accordingly.
-    const requestedFrames = Math.max(1, Math.min(6, Number(collected.frame_count ?? '4') || 4));
+    // Frame-count safety: claude --print can truncate / stall on very large
+    // multi-frame batches. Cap at 10 (high frame counts get progressively
+    // less reliable in a single pass), and tell the model so it can plan.
+    const requestedFrames = Math.max(1, Math.min(10, Number(collected.frame_count ?? '4') || 4));
     if (isMulti) {
       p.push(`Output (multi-frame storyboard) — emit IN THIS EXACT ORDER and SHAPE:`);
       p.push(`1. ONE \`\`\`json#content-graph block.`);
@@ -1961,7 +2071,7 @@ async function runSplitMultiFrameGenerate(
   const pickedStyle = inputs.pickedStyle ?? '';
   const contentTurns = inputs.contentTurns ?? [];
   const aspect = ((collected.aspect ?? '16:9').split(/\s+/)[0] ?? '16:9');
-  const frameCountReq = Math.max(2, Math.min(6, Number(collected.frame_count ?? '4') || 4));
+  const frameCountReq = Math.max(2, Math.min(10, Number(collected.frame_count ?? '4') || 4));
   const totalDurationSec = Number(collected.duration ?? '15') || 15;
   const perFrameDurationSec = Math.max(2, Math.floor(totalDurationSec / frameCountReq));
   let resolution = '1920×1080';

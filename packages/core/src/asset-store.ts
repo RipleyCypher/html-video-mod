@@ -127,6 +127,44 @@ export class AssetStore {
     };
   }
 
+  /**
+   * Store raw bytes (e.g. an MP3 returned by a generation API) as a
+   * content-addressed asset. The id is the sha1 of the bytes, so identical
+   * payloads dedupe; `ext` drives the mime/type via {@link guessMime}.
+   */
+  async addBufferAsset(
+    projectId: string,
+    bytes: Buffer,
+    ext: string,
+    userTags: string[] = [],
+    userCaption?: string,
+  ): Promise<Asset> {
+    if (bytes.length === 0) {
+      throw new HtmlVideoError('invalid-input', 'addBufferAsset: empty buffer');
+    }
+    const normExt = ext.startsWith('.') ? ext.toLowerCase() : `.${ext.toLowerCase()}`;
+    const id = createHash('sha1').update(bytes).digest('hex');
+    const { mime, type } = AssetStore.guessMime(`x${normExt}`);
+    const dir = this.assetsDir(projectId);
+    await mkdir(dir, { recursive: true });
+    const destPath = join(dir, `${id}${normExt}`);
+    if (!existsSync(destPath)) {
+      await writeFile(destPath, bytes);
+    }
+    return {
+      id,
+      type,
+      path: destPath,
+      metadata: {
+        filename: `${id}${normExt}`,
+        mimeType: mime,
+        sizeBytes: bytes.length,
+        ...(userCaption !== undefined && { userCaption }),
+      },
+      userTags,
+    };
+  }
+
   resolvePath(asset: Asset): string {
     if (asset.path) return asset.path;
     throw new HtmlVideoError('asset-not-found', `Asset ${asset.id} has no path`);
