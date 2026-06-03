@@ -1680,6 +1680,34 @@ function renderAttachment(a: Attachment): string[] {
   return [`- [${a.kind}] ${a.filename} — ${a.path}`];
 }
 
+/** LLMs emit not-quite-valid JSON for the content-graph more often than not:
+ *  trailing commas, and (now that we ask them to quote article terms) stray
+ *  straight double-quotes inside string values. Try strict parse first, then
+ *  escalate through cheap, safe repairs before giving up. */
+function parseGraphJsonTolerant(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    /* fall through to repairs */
+  }
+  // 1) Strip trailing commas before } or ] — the most common LLM slip.
+  const noTrailing = raw.replace(/,(\s*[}\]])/g, '$1');
+  try {
+    return JSON.parse(noTrailing);
+  } catch {
+    /* fall through */
+  }
+  // 2) Escape stray straight double-quotes inside synopsis/text string values
+  //    (e.g. text: "the "harness" idea"). Operate on the trailing-comma-cleaned
+  //    text; for each "<key>": "<value>" pair, re-escape any bare " in <value>.
+  const repaired = noTrailing.replace(
+    /("(?:synopsis|text)"\s*:\s*")([\s\S]*?)("\s*(?:,|\}|\]))/g,
+    (_m, pre: string, val: string, post: string) =>
+      pre + val.replace(/\\?"/g, '\\"') + post,
+  );
+  return JSON.parse(repaired); // if this still throws, caller reports it
+}
+
 function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
   const { tmpl, exampleHtml, priorHtml, history, userText, attachments } = args;
 
@@ -2173,7 +2201,7 @@ function extractContentGraphAndFrames(
   if (!graphMatch || !graphMatch[1]) return null;
   let graph: import('@html-video/content-graph').ContentGraph;
   try {
-    graph = JSON.parse(graphMatch[1].trim()) as import('@html-video/content-graph').ContentGraph;
+    graph = parseGraphJsonTolerant(graphMatch[1].trim()) as import('@html-video/content-graph').ContentGraph;
   } catch {
     return null;
   }
@@ -2278,6 +2306,7 @@ async function runSplitMultiFrameGenerate(
   graphPromptParts.push('```');
   graphPromptParts.push('');
   graphPromptParts.push(`Replace the placeholder text in each node with concrete content from the inputs. Adjust intent to match (single-frame|explainer|data-viz|promo|comparison|other). Keep node ids unique. Do NOT return an empty reply. Do NOT emit any HTML this turn.`);
+  graphPromptParts.push(`STRICT JSON: the block must be valid JSON. Inside string values do NOT use straight double-quotes ("…") — if you need to quote a term or title, use 「」 or 《》 or single quotes. No trailing commas. No comments.`);
 
   const graphPrompt = graphPromptParts.join('\n');
   const graphText = await callAgentSimple(agentDef, graphPrompt, projectDir);
@@ -2288,7 +2317,7 @@ async function runSplitMultiFrameGenerate(
   }
   let graph: import('@html-video/content-graph').ContentGraph;
   try {
-    graph = JSON.parse(graphMatch[1].trim()) as import('@html-video/content-graph').ContentGraph;
+    graph = parseGraphJsonTolerant(graphMatch[1].trim()) as import('@html-video/content-graph').ContentGraph;
   } catch (e) {
     throw new Error(`graph JSON failed to parse: ${e instanceof Error ? e.message : e}`);
   }
