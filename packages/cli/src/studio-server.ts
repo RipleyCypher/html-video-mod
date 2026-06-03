@@ -1808,6 +1808,16 @@ function parseGraphJsonTolerant(raw: string): unknown {
   return JSON.parse(repaired); // if this still throws, caller reports it
 }
 
+/** A content type is multi-frame UNLESS it's an explicitly single-frame kind
+ *  (title card / cover / single still). Whitelisting "讲解/explainer/…" was too
+ *  narrow — e.g. "概念解说短片" (解说, not 讲解) fell through to single-frame.
+ *  Inverting the test makes new/renamed multi-frame types default correctly. */
+function isMultiFrameType(pickedType: string): boolean {
+  if (!pickedType) return false;
+  const single = /单帧|单画面|标题卡|封面|logo|title.?card|single.?frame|cover|still/i.test(pickedType);
+  return !single;
+}
+
 function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
   const { tmpl, exampleHtml, priorHtml, history, userText, attachments } = args;
 
@@ -1931,7 +1941,7 @@ function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
     const pickedType = isEdit
       ? lastCardPickByPhase(history, 'type') ?? ''
       : (inputs.pickedType ?? '');
-    const isMulti = !!pickedType && /多帧|预告|时间线|对比|讲解|teaser|explainer|comparison|timeline/i.test(pickedType);
+    const isMulti = !!pickedType && isMultiFrameType(pickedType);
     const defaults = {
       aspect:      pre.aspect      ?? '16:9 横屏',
       duration:    pre.duration    ?? (isMulti ? '15' : '5'),
@@ -2048,8 +2058,9 @@ function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
     const contentTurns = inputs.contentTurns ?? [];
     const aspect = ((collected.aspect ?? '16:9').split(/\s+/)[0] ?? '16:9'); // strip "16:9 横屏" → "16:9"
     const [w, h] = aspect.includes(':') ? aspect.split(':').map(Number) : [16, 9];
-    const isMulti = /多帧|预告|时间线|对比|讲解|teaser|explainer|comparison|timeline/i.test(pickedType)
-      || Number(collected.frame_count ?? '1') > 1;
+    const isMulti = isMultiFrameType(pickedType)
+      || Number(collected.frame_count ?? '1') > 1
+      || Number(collected.per_frame ?? '0') > 0;
 
     // Pick a concrete pixel resolution that respects the aspect choice.
     let resolution = '1920×1080';
