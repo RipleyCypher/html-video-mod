@@ -1944,6 +1944,48 @@ function renderAttachment(a: Attachment): string[] {
   return [`- [${a.kind}] ${a.filename} — ${a.path}`];
 }
 
+/** A design.md / frame.md / DESIGN.md attachment is a brand + motion SPEC the
+ *  video must FOLLOW (palette, type, tokens, pacing/scale/dwell/motion), not
+ *  content to be narrated. Detect by filename or by the spec's tell-tale
+ *  headings, so users can drop in a design.md (portable design system) or
+ *  HeyGen-style frame.md (motion spec). */
+function isDesignSpec(a: Attachment): boolean {
+  const name = (a.filename || '').toLowerCase();
+  if (/(^|\/)(design|frame)\.md$/.test(name) || /\bframe\.md\b|\bdesign\.md\b/.test(name)) return true;
+  const txt = a.inlineText ?? '';
+  if (!txt) return false;
+  // Heading/section fingerprints shared by design.md & frame.md specs.
+  return /#\s*(design|frame)\s*[—\-]/i.test(txt)
+    || /(^|\n)##\s*(System|Theme|Tokens|Motion|Pacing|Composition)\b/i.test(txt)
+    || /\b(pacing|dwell)\b.*\b(scale|motion)\b/i.test(txt);
+}
+
+/** Split attachments into design/motion specs vs ordinary source material. */
+function partitionAttachments(atts: Attachment[]): { specs: Attachment[]; content: Attachment[] } {
+  const specs: Attachment[] = [];
+  const content: Attachment[] = [];
+  for (const a of atts) (a.inlineText && isDesignSpec(a) ? specs : content).push(a);
+  return { specs, content };
+}
+
+/** Prompt block telling the agent to OBEY a design/frame spec. */
+function renderDesignSpecBlock(specs: Attachment[]): string[] {
+  if (!specs.length) return [];
+  const out: string[] = [
+    `DESIGN SYSTEM / MOTION SPEC (REQUIRED — obey this for every frame): the file(s)`,
+    `below define the brand's visual + motion language. Honour their palette,`,
+    `typography, tokens, layout AND any motion direction (pacing, scale, dwell,`,
+    `motion) over your own defaults. This is HOW the video must look/move; the`,
+    `actual subject still comes from the user's content.`,
+  ];
+  for (const a of specs) {
+    out.push(`--- ${a.filename} ---`);
+    out.push((a.inlineText ?? '').slice(0, 6000));
+  }
+  out.push('');
+  return out;
+}
+
 /** LLMs emit not-quite-valid JSON for the content-graph more often than not:
  *  trailing commas, and (now that we ask them to quote article terms) stray
  *  straight double-quotes inside string values. Try strict parse first, then
@@ -2276,10 +2318,15 @@ function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
     p.push(`- 帧数: ${collected.frame_count ?? (isMulti ? '4' : '1')}`);
     p.push('');
     if (attachments.length > 0) {
-      p.push(`Attachments:`);
-      for (const a of attachments) p.push(...renderAttachment(a));
-      p.push(`Use binary attachments (images, data files) as actual assets where appropriate (logo, screenshot, data file). The inlined text/article/repo content above is the SOURCE MATERIAL — base the video's actual content (facts, names, numbers, narrative) on it, don't just decorate with it.`);
-      p.push('');
+      const { specs, content } = partitionAttachments(attachments);
+      // A design.md / frame.md is a style+motion spec to OBEY, surfaced first.
+      p.push(...renderDesignSpecBlock(specs));
+      if (content.length > 0 || specs.length === 0) {
+        p.push(`Attachments:`);
+        for (const a of (content.length ? content : attachments)) p.push(...renderAttachment(a));
+        p.push(`Use binary attachments (images, data files) as actual assets where appropriate (logo, screenshot, data file). The inlined text/article/repo content above is the SOURCE MATERIAL — base the video's actual content (facts, names, numbers, narrative) on it, don't just decorate with it.`);
+        p.push('');
+      }
     }
     p.push(`Constraints: full-bleed ${resolution}, opens with an animation timeline, inline CSS + JS, single complete <!doctype html>...</html> document(s). CDN imports (Tailwind, GSAP) are fine. Tag every visible text node with data-hv-text set to a stable key (brand_name, headline, item_1, cta…). No prose outside code blocks.`);
     p.push('');
@@ -2645,7 +2692,9 @@ async function runSplitMultiFrameGenerate(
   // Inline the fetched article / repo / uploaded text — THIS is the subject of
   // the video. Without it the planner only sees the type word and invents a
   // video "about 概念解说" instead of about the user's actual source.
-  const sourceTexts = attachments.filter((a) => !!a.inlineText);
+  const { specs: designSpecs, content: contentAtts } = partitionAttachments(attachments);
+  if (designSpecs.length > 0) graphPromptParts.push('', ...renderDesignSpecBlock(designSpecs));
+  const sourceTexts = contentAtts.filter((a) => !!a.inlineText);
   if (sourceTexts.length > 0) {
     graphPromptParts.push('');
     graphPromptParts.push(`SOURCE MATERIAL — the video MUST be about THIS content (real facts, names, numbers from it). This is the subject, not the type:`);
@@ -2729,7 +2778,9 @@ async function runSplitMultiFrameGenerate(
     // Fetched article/repo text — keep the per-frame HTML grounded in the real
     // source, not just the one-line graph node. (Graph step gets the full text;
     // give each frame a trimmed slice so it can pull accurate specifics.)
-    const frameSourceTexts = attachments.filter((a) => !!a.inlineText);
+    const { specs: frameSpecs, content: frameContentAtts } = partitionAttachments(attachments);
+    if (frameSpecs.length > 0) fp.push(...renderDesignSpecBlock(frameSpecs));
+    const frameSourceTexts = frameContentAtts.filter((a) => !!a.inlineText);
     if (frameSourceTexts.length > 0) {
       fp.push(`SOURCE MATERIAL (the video's real subject — use its actual facts/names/numbers, never generic filler about the content type):`);
       for (const a of frameSourceTexts) fp.push((a.inlineText ?? '').slice(0, 3000));

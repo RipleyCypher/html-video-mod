@@ -50,7 +50,7 @@ const DICT = {
     'composer.placeholder.no_template':
       'Describe a video, or paste an article link / GitHub repo to build one from it.',
     'composer.placeholder.with_template': 'Describe the video — content, names, data… or paste an article link / GitHub repo.',
-    'composer.hint': 'Cmd / Ctrl + Enter · drag / paste files',
+    'composer.hint': 'Cmd / Ctrl + Enter · drag / paste files · drop a design.md / frame.md to lock brand + motion',
     'composer.send': 'Send',
     'composer.attach': 'Attach file',
     'composer.focus_chip': 'Editing only frame {order} {fid}',
@@ -285,7 +285,7 @@ const DICT = {
     'composer.placeholder.focus': '只修改这一帧的内容（点掉上方芯片可恢复整片）…',
     'composer.placeholder.no_template': '描述视频，或粘一个文章链接 / GitHub repo 据此生成。',
     'composer.placeholder.with_template': '描述视频 — 内容、名字、数据…或粘文章链接 / GitHub repo。',
-    'composer.hint': 'Cmd / Ctrl + Enter · 拖拽 / 粘贴文件',
+    'composer.hint': 'Cmd / Ctrl + Enter · 拖拽 / 粘贴文件 · 拖入 design.md / frame.md 锁定品牌+动效',
     'composer.send': '发送',
     'composer.attach': '附加文件',
     'composer.focus_chip': '仅修改第 {order} 帧 {fid}',
