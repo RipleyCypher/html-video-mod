@@ -231,9 +231,9 @@ function isExportIntent(text) {
   const t = text.trim();
   if (t.length > 40) return false;        // long messages are content / iterate requests
   if (/https?:\/\//i.test(t)) return false; // a link is ALWAYS source material to build from, never "export"
-  // "生成/做一个视频" is the most common way to ask to CREATE a video — it must
+  // "generate / make a video" is the most common way to ask to CREATE a video — it must
   // NOT count as export. Only match explicit export/render verbs that target an
-  // already-produced result: 导出 / 出片 / 渲染 / export / render / encode / 输出mp4.
+  // already-produced result: export / produce / render / encode / output mp4.
   return /^\s*(?:export|render|encode|导出(?:视频|为?\s?mp4)?|出片|渲染|输出\s?mp4|存为\s?mp4)\s*$/i.test(t)
     || /(?:^|\s)(?:导出|出片|渲染成?|export|render|encode)(?:$|\s|视频|为?\s?mp4|成\s?mp4)/i.test(t);
 }
@@ -1470,8 +1470,8 @@ function renderMessage(m, idx) {
   const confirmP = parseHvConfirm(raw);
   if (confirmP.confirm) {
     // Only lock the card when the click actually led somewhere:
-    //   - "✏️ 改一下" → next assistant turn re-emitted hv-form (the edit landed)
-    //   - "✓ 开始生成" → next assistant turn produced real output
+    //   - "✏️ Edit" → next assistant turn re-emitted hv-form (the edit landed)
+    //   - "✓ Start generating" → next assistant turn produced real output
     //                   (preview-event / ✓ HTML preview / storyboard summary)
     // If the click triggered an empty reply or generate failed, treat the
     // card as live so the user can press the button again.
@@ -1599,15 +1599,15 @@ function parseHvOptions(text) {
 // Multi-field input card. Schema:
 //   ```hv-form
 //   {
-//     "title": "讲一下你想做的视频…",
+//     "title": "Tell us about the video you want to make…",
 //     "fields": [
-//       { "key": "topic",     "label": "主题 / who-what",   "kind": "text",     "required": true },
-//       { "key": "headline",  "label": "Headline",          "kind": "text",     "required": true },
-//       { "key": "data",      "label": "关键数字 / 数据",   "kind": "textarea" },
-//       { "key": "aspect",    "label": "尺寸",              "kind": "select",   "options": ["16:9","9:16","1:1","4:5"], "default": "16:9" },
-//       { "key": "duration",  "label": "时长(秒)",          "kind": "select",   "options": ["3","5","10","15","30"], "default": "5" },
-//       { "key": "frame_count","label": "帧数 / 画面数",    "kind": "text",     "default": "1" },
-//       { "key": "style",     "label": "风格描述",          "kind": "textarea" }
+//       { "key": "topic",     "label": "Topic / who-what",    "kind": "text",     "required": true },
+//       { "key": "headline",  "label": "Headline",            "kind": "text",     "required": true },
+//       { "key": "data",      "label": "Key numbers / data",  "kind": "textarea" },
+//       { "key": "aspect",    "label": "Size",                "kind": "select",   "options": ["16:9","9:16","1:1","4:5"], "default": "16:9" },
+//       { "key": "duration",  "label": "Duration (sec)",      "kind": "select",   "options": ["3","5","10","15","30"], "default": "5" },
+//       { "key": "frame_count","label": "Frame count",        "kind": "text",     "default": "1" },
+//       { "key": "style",     "label": "Style description",   "kind": "textarea" }
 //     ],
 //     "allow_attachments": true
 //   }
@@ -1627,8 +1627,8 @@ function parseHvForm(text) {
 // === hv-confirm block parsing ===
 //   ```hv-confirm
 //   {
-//     "title": "按这些信息开始生成？",
-//     "summary": [{ "label": "主题", "value": "nexu-io" }, ...],
+//     "title": "Start generating with this information?",
+//     "summary": [{ "label": "Topic", "value": "nexu-io" }, ...],
 //     "actions": ["generate","edit"]   // optional, defaults to both
 //   }
 function parseHvConfirm(text) {
@@ -1696,14 +1696,14 @@ function renderFormCard(form, submitted, msgIdx) {
     : '';
   const dropHtml = allowAttachments && !submitted ? `
     <div class="form-attachments" data-form-msg="${msgIdx}">
-      <div class="form-drop-hint">📎 拖拽 / 粘贴 / 选择文件作为素材（logo、截图、数据 CSV…可选）</div>
+      <div class="form-drop-hint">${t('form.drop_hint')}</div>
       <div class="form-attachment-list" id="form-att-${msgIdx}"></div>
       <input type="file" id="form-file-${msgIdx}" multiple style="display:none" />
-      <button type="button" class="form-attach-btn" data-form-msg="${msgIdx}">+ 添加文件</button>
+      <button type="button" class="form-attach-btn" data-form-msg="${msgIdx}">${t('form.add_file')}</button>
     </div>` : '';
   const actionsHtml = submitted ? '' : `
     <div class="form-actions">
-      <button class="form-submit" data-form-msg="${msgIdx}">提交 ↵</button>
+      <button class="form-submit" data-form-msg="${msgIdx}">${t('form.submit')}</button>
     </div>`;
   return `<div class="form-card${submitted ? ' submitted' : ''}">
     <div class="form-title">${esc(title)}</div>
@@ -1729,8 +1729,8 @@ function renderConfirmCard(confirm, resolved, msgIdx) {
   }).join('');
   const actionsHtml = resolved ? '' : `
     <div class="confirm-actions">
-      ${actions.includes('generate') ? `<button class="confirm-go" data-confirm-msg="${msgIdx}" data-action="generate">✓ 开始生成</button>` : ''}
-      ${actions.includes('edit') ? `<button class="confirm-edit" data-confirm-msg="${msgIdx}" data-action="edit">✏️ 修改</button>` : ''}
+      ${actions.includes('generate') ? `<button class="confirm-go" data-confirm-msg="${msgIdx}" data-action="generate">${t('confirm.generate')}</button>` : ''}
+      ${actions.includes('edit') ? `<button class="confirm-edit" data-confirm-msg="${msgIdx}" data-action="edit">${t('confirm.edit')}</button>` : ''}
     </div>`;
   return `<div class="confirm-card${resolved ? ' resolved' : ''}">
     <div class="confirm-title">${esc(title)}</div>
@@ -1956,7 +1956,7 @@ async function commitInlineTextEdits(iframe) {
     if (!r.ok) throw new Error(`fetch failed ${r.status}`);
     serverHtml = await r.text();
   } catch (e) {
-    toast(`保存失败：${e.message}`, 'error');
+    toast(t('toast.save_failed', { message: e.message }), 'error');
     return;
   }
   const parser = new DOMParser();
@@ -1989,7 +1989,7 @@ async function commitInlineTextEdits(iframe) {
       body: JSON.stringify({ html: out }),
     });
     if (!r.ok) throw new Error(`save failed ${r.status}`);
-    toast(`已保存 ${changed} 处修改`, 'success');
+    toast(t('toast.saved', { changed }), 'success');
     // Refresh local project state so frames-strip thumbnails cache-bust.
     if (fid) {
       const pr = await API.getProject(projectId);
@@ -1997,7 +1997,7 @@ async function commitInlineTextEdits(iframe) {
       renderFramesStrip();
     }
   } catch (e) {
-    toast(`保存失败：${e.message}`, 'error');
+    toast(t('toast.save_failed', { message: e.message }), 'error');
   }
 }
 
@@ -2062,7 +2062,7 @@ function renderFramesStrip() {
     return `<button class="${cls}" data-fid="${esc(f.graphNodeId)}">
       <div class="frame-thumb">
         <iframe sandbox="allow-scripts" src="${src}" tabindex="-1" loading="lazy"></iframe>
-        ${isFocus ? '<div class="focus-mark" title="正在编辑此帧">✎</div>' : ''}
+        ${isFocus ? `<div class="focus-mark" title="${t('frame.editing_title')}">${t('frame.editing')}</div>` : ''}
       </div>
       <div class="frame-tab-label">
         <span class="order">${String(f.order + 1).padStart(2, '0')}</span>
@@ -2362,12 +2362,12 @@ async function sendMessage() {
       // Clear UI attachments before request so user sees them disappear
       state.pendingAttachments = [];
       renderAttachments();
-      res = await fetch(`/api/projects/${state.selected.id}/messages`, {
+      res = await fetch(`/api/projects/${state.selected.id}/messages?locale=${getLocale()}`, {
         method: 'POST',
         body: fd,
       });
     } else {
-      res = await fetch(`/api/projects/${state.selected.id}/messages`, {
+      res = await fetch(`/api/projects/${state.selected.id}/messages?locale=${getLocale()}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
@@ -3090,14 +3090,14 @@ function esc(s) {
 
 window.addEventListener('error', (e) => {
   console.error('[hv-studio] uncaught:', e.error || e.message);
-  try { toast(`错误：${e.error?.message || e.message}`, 'error'); } catch {}
+  try { toast(t('toast.error', { message: e.error?.message || e.message }), 'error'); } catch {}
 });
 window.addEventListener('unhandledrejection', (e) => {
   console.error('[hv-studio] unhandled rejection:', e.reason);
-  try { toast(`错误：${e.reason?.message || e.reason}`, 'error'); } catch {}
+  try { toast(t('toast.error', { message: e.reason?.message || e.reason }), 'error'); } catch {}
 });
 init().catch((e) => {
   console.error('[hv-studio] init failed:', e);
-  try { toast(`init 失败：${e.message}`, 'error'); } catch {}
+  try { toast(t('toast.init_failed', { message: e.message }), 'error'); } catch {}
 });
 

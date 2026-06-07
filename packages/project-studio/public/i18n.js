@@ -262,6 +262,19 @@ const DICT = {
     'tpl_preview.source_skill': 'Adapted from',
     'tpl_preview.source_origin': 'Design lineage',
     'tpl_preview.source_license': 'License',
+
+    // ---- Form / card UI strings (used in app.js) ----
+    'form.drop_hint': '📎 Drag / paste / select files as assets (logo, screenshots, data CSV… optional)',
+    'form.add_file': '+ Add file',
+    'form.submit': 'Submit ↵',
+    'confirm.generate': '✓ Start generating',
+    'confirm.edit': '✏️ Edit',
+    'toast.save_failed': 'Save failed: {message}',
+    'toast.saved': 'Saved {changed} changes',
+    'toast.error': 'Error: {message}',
+    'toast.init_failed': 'Init failed: {message}',
+    'frame.editing': '✎',
+    'frame.editing_title': 'Editing this frame',
   },
 
   zh: {
@@ -505,6 +518,19 @@ const DICT = {
     'tpl_preview.source_skill': '改编自',
     'tpl_preview.source_origin': '设计渊源',
     'tpl_preview.source_license': '许可证',
+
+    // ---- Form / card UI strings (used in app.js) ----
+    'form.drop_hint': '📎 拖拽 / 粘贴 / 选择文件作为素材（logo、截图、数据 CSV…可选）',
+    'form.add_file': '+ 添加文件',
+    'form.submit': '提交 ↵',
+    'confirm.generate': '✓ 开始生成',
+    'confirm.edit': '✏️ 修改',
+    'toast.save_failed': '保存失败：{message}',
+    'toast.saved': '已保存 {changed} 处修改',
+    'toast.error': '错误：{message}',
+    'toast.init_failed': 'init 失败：{message}',
+    'frame.editing': '✎',
+    'frame.editing_title': '正在编辑此帧',
   },
 };
 

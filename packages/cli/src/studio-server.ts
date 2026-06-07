@@ -14,6 +14,19 @@ import type { CliContext } from './context.js';
 import { AssetStore, generateTts, generateMusic } from '@html-video/core';
 import { extractUrls, fetchSource } from './fetch-source.js';
 import { detectAll, findAgent, spawnAgent } from '@html-video/runtime';
+import { st, aspectValue } from './server-i18n.js';
+
+/**
+ * Extract locale from request (query param or header).
+ * Falls back to 'en' if not provided.
+ */
+function getLocale(req: IncomingMessage, url: URL): string {
+  const fromQuery = url.searchParams.get('locale');
+  if (fromQuery === 'zh' || fromQuery === 'en') return fromQuery;
+  const fromHeader = req.headers['x-locale'];
+  if (fromHeader === 'zh' || fromHeader === 'en') return fromHeader;
+  return 'en';
+}
 
 interface StudioHandle {
   url: string;
@@ -672,6 +685,7 @@ export async function startStudioServer(ctx: CliContext, port: number): Promise<
       // prompt as attachments.
       if (msgsMatch && msgsMatch[1] && m === 'POST') {
         const id = msgsMatch[1];
+        const locale = getLocale(req, url);
         const ct = req.headers['content-type'] ?? '';
         let userText = '';
         let focusFrameId = '';
@@ -843,6 +857,7 @@ export async function startStudioServer(ctx: CliContext, port: number): Promise<
           history,
           userText,
           attachments,
+          locale,
           focusFrameId: focusFrameId || undefined,
           openingTopic: resolveOpeningTopic(project, history),
         });
@@ -948,8 +963,8 @@ export async function startStudioServer(ctx: CliContext, port: number): Promise<
           if (rewriteInputs) {
             const n = (project.frames ?? []).length || Number(phaseInfo.inputs.collected?.frame_count ?? '3');
             const notice = restyleOnly
-              ? `🎨 沿用文案，按新风格重做全部 ${n} 帧…\n`
-              : `🔄 基于新内容重做全部 ${n} 帧（已手动修改过的帧会被覆盖）…\n`;
+              ? st(locale, 'progress.restyle_all', n)
+              : st(locale, 'progress.regen_all', n);
             assistantText += notice;
             sseWrite({ type: 'text', chunk: notice });
           }
@@ -958,6 +973,7 @@ export async function startStudioServer(ctx: CliContext, port: number): Promise<
               ctx,
               projectId: id,
               projectDir,
+              locale,
               agentDef,
               agentModel,
               tmpl,
@@ -1018,7 +1034,7 @@ export async function startStudioServer(ctx: CliContext, port: number): Promise<
           // that only ships the user's request + a tiny instruction. This
           // catches the 6-8KB-prompt empty-reply mode.
           if (assistantText.trim().length < 32 && phaseInfo.phase === 'iterate' && priorHtml) {
-            sseWrite({ type: 'text', chunk: '\n↻ 第一次输出为空，重试中…\n' });
+            sseWrite({ type: 'text', chunk: st(locale, 'progress.empty_retry') });
             // Retry without inlining the prior HTML — same observation as
             // the iterate prompt itself: claude --print silently no-ops
             // when fed multi-KB of HTML to rewrite.
@@ -1523,7 +1539,7 @@ type MultipartPart =
  * Two encodings can appear:
  *  - `filename*=UTF-8''%E4%B8%AD%E6%96%87.md` (RFC 5987, percent-encoded) —
  *    decode the percent-escapes after stripping the charset prefix.
- *  - `filename="中文.md"` — the bytes are UTF-8, but the multipart body was
+  *  - `filename="Chinese.md"` — the bytes are UTF-8, but the multipart body was
  *    read as a latin1 string, so each UTF-8 byte became one latin1 char. Round
  *    -trip latin1→utf8 to restore the original. If the name was plain ASCII the
  *    round-trip is a no-op.
@@ -1670,6 +1686,7 @@ interface BuildPromptArgs {
   history: ChatMessage[];
   userText: string;
   attachments: Attachment[];
+  locale: string;
   /** When set, iterate-phase prompts target only this frame's HTML. */
   focusFrameId?: string;
   /** The user's original opening subject, locked across phases. */
@@ -1711,9 +1728,9 @@ interface Attachment {
  * a `meta.phase` JSON field so the server can route the user's reply without
  * guessing.
  *
- *   opener  → hv-options{meta.phase:"type"}  → user picks content type
- *   content → free chat: agent asks about topic / headline / data, user
- *             can answer in 1+ turns or say "skip" / "随便"
+  *   opener  → hv-options{meta.phase:"type"}  → user picks content type
+  *   content → free chat: agent asks about topic / headline / data, user
+  *             can answer in 1+ turns or say "skip" / "whatever"
  *   style   → hv-options{meta.phase:"style"} → user picks style preset
  *             (skipped automatically if a project template is already set)
  *   format  → hv-form{meta.phase:"format"}   → 3 segmented controls
@@ -1789,7 +1806,7 @@ function detectPhase(
   // was asking for format params (whether it rendered the hv-form card or — as
   // the model sometimes does — just asked in prose), and this user turn parses
   // as a format answer, treat it like a card submit and advance to confirm.
-  // This stops the loop where a typed "16:9 横屏 / 5s / 10" goes unrecognised
+  // This stops the loop where a typed "16:9 landscape / 5s / 10" goes unrecognised
   // and the flow re-asks the same params in a different shape.
   if (!hadGenerationYet(history) && lastAssistantAskedFormat(history)) {
     const parsed = parseFormatReply(trimmed);
@@ -1803,9 +1820,9 @@ function detectPhase(
 
   // Post-generation iteration. Previously ANY message after a generation was
   // forced to phase 'iterate', which only ever did a vague single-frame rewrite
-  // of preview.html — so "换个风格" / "改内容" looked like nothing happened
-  // (the user's recurring "后面的指令好像都没用了"). Instead, run a small
-  // card-driven sub-flow: a vague "改一下" pops an edit-menu (change style /
+  // of preview.html — so "change style" / "change content" looked like nothing happened
+  // (the user's recurring "the later instructions seem to have stopped working"). Instead, run a small
+  // card-driven sub-flow: a vague "change it a bit" pops an edit-menu (change style /
   // content / duration); picking an option re-uses the existing style / content
   // / format cards; the final regeneration is based on the existing storyboard.
   if (hadGenerationYet(history)) {
@@ -1822,7 +1839,7 @@ function detectPhase(
         inputs.pickedType = lastCardPickByPhase(history, 'type');
         return { phase: 'format', inputs, postGen: true };
       }
-      // default / "内容 / content / 文案 / 主题 / 重写"
+      // default / "content / topic / rewrite"
       inputs.pickedType = lastCardPickByPhase(history, 'type');
       inputs.contentTurns = collectContentTurns(history);
       return { phase: 'content', inputs, postGen: true };
@@ -1844,11 +1861,11 @@ function detectPhase(
     }
     // A fresh post-generation instruction. The DEFAULT is the card-driven
     // sub-flow, not a single-frame rewrite — a whitelist of trigger phrases was
-    // the bug (e.g. "换个模板重新生成一下" didn't match and silently fell back to
+    // the bug (e.g. "regenerate with a different template" didn't match and silently fell back to
     // a no-op preview rewrite). So:
     //   - pinned frame  → single-frame iterate (the user explicitly scoped it).
     //   - clearly names style / content / duration → jump straight there.
-    //   - everything else (incl. vague "改一下" / "换个模板" / "重新生成") → pop
+    //   - everything else (incl. vague "change it" / "switch template" / "regenerate") → pop
     //     the edit-menu and ask, rather than guess or no-op.
     const pinned = !!focusFrameId;
     if (pinned) {
@@ -1903,7 +1920,7 @@ function detectPhase(
     inputs.pickedType = lastCardPickByPhase(history, 'type');
     inputs.pickedStyle = trimmed;
     inputs.contentTurns = collectContentTurns(history);
-    // "从设计模板选" but no template actually picked → don't silently fall back
+    // "Pick from design template" but no template actually picked → don't silently fall back
     // to a default look; ask the user to pick one (top-bar) or choose a style.
     if (isFromTemplateStyle(trimmed) && !hasTemplate) {
       return { phase: 'need-template', inputs };
@@ -1936,11 +1953,11 @@ function detectPhase(
     const isSkip = /^(skip|跳过|够了|够|done|next|下一步|ok|好|不知道)$/i.test(trimmed)
       || trimmed.length <= 3;
     // "Free rein" answers — the user is handing the subject's details to the
-    // agent ("随便生成 / 随便发挥 / 你定 / 都行 / 随机"). These should advance the
+    // agent ("generate randomly" / "use your judgement" / "you decide" / "either is fine" / "random"). These should advance the
     // flow (and pop the style card) just like a skip, instead of being treated
-    // as more content to collect — which left the user stuck re-typing "风格选择".
+    // as more content to collect — which left the user stuck re-typing "style selection".
     // Substring match (not anchored) with a length guard so it doesn't swallow a
-    // real sentence that merely contains "随便".
+    // real sentence that merely contains "whatever".
     const isFreeRein =
       trimmed.length <= 16 &&
       /(随便|随机|随意|你定|你来定|你决定|都行|都可以|看着办|自由发挥|发挥|无所谓|任意|随你)/.test(trimmed);
@@ -2026,7 +2043,7 @@ function lastCardPickByPhase(history: ChatMessage[], phase: string): string | un
 
 /** All free-text user replies during the content phase (between type-pick and style/format). */
 /** A short user turn that just nudges the flow forward ("continue", "go",
- *  "下一步", "开始生成") rather than supplying video content. Such turns must
+ *  "next step", "start generating") rather than supplying video content. Such turns must
  *  not be collected as content — otherwise they end up as on-screen text. */
 function isControlPhrase(t: string): boolean {
   const s = t.trim().toLowerCase().replace(/[。.!！~\s]+$/u, '');
@@ -2058,9 +2075,9 @@ function collectContentTurns(history: ChatMessage[]): string[] {
     const t = m.content.trim();
     if (!t) continue;
     if (t.startsWith('[hv-')) continue; // skip marker messages
-    // Skip control phrases ("continue / next / go / 开始生成 …"). These are the
+    // Skip control phrases ("continue / next / go / start generating …"). These are the
     // user nudging the flow forward, NOT video content — otherwise e.g.
-    // "继续刚刚的任务" gets baked in as the opening frame's headline.
+    // "continue the previous task" gets baked in as the opening frame's headline.
     if (isControlPhrase(t)) continue;
     // Skip the "trimmed answer" that picks the type — it's the first user turn
     // immediately after the type card; keep only later ones.
@@ -2077,9 +2094,9 @@ function collectContentTurns(history: ChatMessage[]): string[] {
 
 /**
  * The video's LOCKED subject, in the user's own words. The opening message
- * ("帮我生成一个关于 Open Design 的介绍视频") names the subject, but it never
+ * ("Help me generate an intro video about Open Design") names the subject, but it never
  * reached the generate / storyboard prompts: collectContentTurns() only keeps
- * turns after the type-pick card, so a later vague answer like "随机" became the
+ * turns after the type-pick card, so a later vague answer like "random" became the
  * entire content input and the video came out about randomness instead of Open
  * Design. This recovers the opening subject so every downstream prompt can lock
  * onto it.
@@ -2094,7 +2111,7 @@ function resolveOpeningTopic(project: { intent?: string }, history: ChatMessage[
   if (fromIntent) return fromIntent.slice(0, 200);
   const firstUser = history.find((m) => m.role === 'user')?.content ?? '';
   const clean = (firstUser.split('\n\n📎')[0] ?? '').trim();
-  // Don't lock onto a bare control phrase ("继续" / "ok") if that's somehow first.
+  // Don't lock onto a bare control phrase ("continue" / "ok") if that's somehow first.
   if (!clean || isControlPhrase(clean)) return '';
   return clean.slice(0, 200);
 }
@@ -2161,7 +2178,7 @@ function lastAssistantAskedFormat(history: ChatMessage[]): boolean {
     }
     // Prose fallback: the turn talks about size/duration/frames without a card.
     // Require at least two of the three concepts so an unrelated mention of
-    // "时长" elsewhere doesn't trigger it.
+    // "duration" elsewhere doesn't trigger it.
     const hits = [/尺寸|横屏|竖屏|方形|aspect|比例/i, /时?长|秒|duration|\bs\b/i, /帧|frames?/i]
       .filter((re) => re.test(c)).length;
     return hits >= 2;
@@ -2175,7 +2192,7 @@ function lastAssistantAskedFormat(history: ChatMessage[]): boolean {
  * The format step is supposed to render an `hv-form` card (segmented buttons)
  * whose submit carries an explicit `[hv-form:submit]` marker. But the model
  * sometimes ignores that instruction and instead asks for the params in prose
- * ("9:16 竖屏 / 3s / 6 …"); the user then types the answer free-form, with no
+ * ("9:16 portrait / 3s / 6 …"); the user then types the answer free-form, with no
  * marker. Without this parser the state machine can't tell the params were
  * already given, so it loops — re-asking the same thing in a different shape
  * (issue #2). We extract aspect / duration / frame_count heuristically so a
@@ -2197,16 +2214,16 @@ export function parseFormatReply(text: string): Record<string, string> | undefin
   else if (ratioNorm === '1:1' || /方形|square/i.test(t)) out.aspect = '1:1 方形';
   else if (ratioNorm === '4:5' || /小红书|xiaohongshu|rednote/i.test(t)) out.aspect = '4:5 小红书';
 
-  // --- duration: a number directly tied to seconds (5s / 5秒 / 5 sec) ---
+  // --- duration: a number directly tied to seconds (5s / 5 sec) ---
   const dur = /(\d{1,3})\s*(?:s\b|秒|sec)/i.exec(t);
   if (dur?.[1]) out.duration = dur[1];
 
-  // --- frame_count: a number tied to 帧/frame, or the lone trailing number in
+  // --- frame_count: a number tied to frame, or the lone trailing number in
   //     a "a / b / c" triple where a=ratio, b=duration. ---
   const fr = /(\d{1,2})\s*(?:帧|frames?)\b/i.exec(t);
   if (fr?.[1]) out.frame_count = fr[1];
   else {
-    // "16:9 横屏 / 5s / 10" — after stripping ratio+duration tokens, a bare
+    // "16:9 landscape / 5s / 10" — after stripping ratio+duration tokens, a bare
     // small integer left over is the frame count.
     const parts = t.split(/[/、,，]+/).map((s) => s.trim()).filter(Boolean);
     if (parts.length >= 2) {
@@ -2320,8 +2337,8 @@ function parseGraphJsonTolerant(raw: string): unknown {
 }
 
 /** A content type is multi-frame UNLESS it's an explicitly single-frame kind
- *  (title card / cover / single still). Whitelisting "讲解/explainer/…" was too
- *  narrow — e.g. "概念解说短片" (解说, not 讲解) fell through to single-frame.
+ *  (title card / cover / single still). Whitelisting "explainer/…" was too
+ *  narrow — e.g. "concept explainer short" (explainer-narration, not lecture-narration) fell through to single-frame.
  *  Inverting the test makes new/renamed multi-frame types default correctly. */
 function isMultiFrameType(pickedType: string): boolean {
   if (!pickedType) return false;
@@ -2330,7 +2347,7 @@ function isMultiFrameType(pickedType: string): boolean {
 }
 
 function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
-  const { tmpl, exampleHtml, priorHtml, history, userText, attachments, openingTopic } = args;
+  const { tmpl, exampleHtml, priorHtml, history, userText, attachments, locale, openingTopic } = args;
 
   // When a template is selected, its own source HTML is the style ground truth —
   // NOT a prior render. Otherwise a project that was previously rendered in some
@@ -2354,11 +2371,11 @@ function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
     em.push('```hv-options');
     em.push(JSON.stringify({
       meta: { phase: 'edit-menu' },
-      question: '想改哪方面？',
+      question: st(locale, 'card.edit.question'),
       options: [
-        { label: '🎨 换风格', hint: '保留内容，换一套视觉风格' },
-        { label: '✏️ 改内容', hint: '改文案 / 主题 / 重写脚本' },
-        { label: '⏱️ 改时长', hint: '调整每帧时长 / 节奏' },
+        { label: st(locale, 'card.edit.style.label'), hint: st(locale, 'card.edit.style.hint') },
+        { label: st(locale, 'card.edit.content.label'), hint: st(locale, 'card.edit.content.hint') },
+        { label: st(locale, 'card.edit.duration.label'), hint: st(locale, 'card.edit.duration.hint') },
       ],
       allow_freeform: true,
     }, null, 2));
@@ -2381,12 +2398,12 @@ function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
     opener.push('```hv-options');
     opener.push(JSON.stringify({
       meta: { phase: 'type' },
-      question: '想做哪种内容？',
+      question: st(locale, 'card.type.question'),
       options: [
-        { label: '单帧标题卡',   hint: 'logo / 封面 / 单画面 - 5-10s' },
-        { label: '多帧预告片',   hint: '产品 / 活动 teaser, 3-6 帧' },
-        { label: '数据大字报',   hint: '1-2 个核心数字, 社媒爆款风' },
-        { label: '概念解说短片', hint: '几帧讲清一个 idea / feature' },
+        { label: st(locale, 'card.type.single.label'), hint: st(locale, 'card.type.single.hint') },
+        { label: st(locale, 'card.type.multi.label'), hint: st(locale, 'card.type.multi.hint') },
+        { label: st(locale, 'card.type.data.label'), hint: st(locale, 'card.type.data.hint') },
+        { label: st(locale, 'card.type.explainer.label'), hint: st(locale, 'card.type.explainer.hint') },
       ],
       allow_freeform: true,
     }, null, 2));
@@ -2427,9 +2444,9 @@ function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
     p.push('');
     p.push(`Goal: surface what the video is ABOUT (topic, brand / project name, headline / tagline, key numbers or data points). The user can answer, partially answer, or say "随便发挥 / skip / 不知道" — accept whatever they give and move on.`);
     p.push('');
-    // The user's opening request already names the subject (e.g. "做一个 Open
-    // Design 推广视频"). Lock onto it: don't let a vague follow-up answer like
-    // "随机/随便/anything" silently become a literal NEW topic — that's how a
+    // The user's opening request already names the subject (e.g. "make an Open
+    // Design promo video"). Lock onto it: don't let a vague follow-up answer like
+    // "random/whatever/anything" silently become a literal NEW topic — that's how a
     // "promote Open Design" request turned into a probability explainer.
     {
       const openingTopic = history.find((m) => m.role === 'user')?.content?.trim().slice(0, 200);
@@ -2460,13 +2477,13 @@ function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
     p.push('```hv-options');
     p.push(JSON.stringify({
       meta: { phase: 'style' },
-      question: '视觉风格怎么定？',
+      question: st(locale, 'card.style.question'),
       options: [
-        { label: 'Cyberpunk glitch',   hint: '霓虹 / 故障感 / 高对比' },
-        { label: 'Swiss minimalist',   hint: '网格 / 无衬线 / 留白' },
-        { label: 'Warm-grain magazine',hint: '纸感 / 衬线 / 暖色' },
-        { label: 'Mono brutalist',     hint: '黑白 / 块状 / 粗体' },
-        { label: '从设计模板选',       hint: '上方挑一个现成模板' },
+        { label: 'Cyberpunk glitch',   hint: st(locale, 'card.style.cyber.hint') },
+        { label: 'Swiss minimalist',   hint: st(locale, 'card.style.swiss.hint') },
+        { label: 'Warm-grain magazine',hint: st(locale, 'card.style.warm.hint') },
+        { label: 'Mono brutalist',     hint: st(locale, 'card.style.brutal.hint') },
+        { label: st(locale, 'card.style.from_template'), hint: st(locale, 'card.style.from_template.hint') },
       ],
       allow_freeform: true,
     }, null, 2));
@@ -2485,13 +2502,13 @@ function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
     p.push('```hv-options');
     p.push(JSON.stringify({
       meta: { phase: 'need-template' },
-      question: '先在顶部「模板」里选一个模板，选好后点下面继续；或直接选一种内置风格：',
+      question: st(locale, 'card.need_template.question'),
       options: [
-        { label: '我已选好模板，继续', hint: '用顶部选中的模板生成' },
-        { label: 'Cyberpunk glitch',   hint: '霓虹 / 故障感 / 高对比' },
-        { label: 'Swiss minimalist',   hint: '网格 / 无衬线 / 留白' },
-        { label: 'Warm-grain magazine',hint: '纸感 / 衬线 / 暖色' },
-        { label: 'Mono brutalist',     hint: '黑白 / 块状 / 粗体' },
+        { label: st(locale, 'card.need_template.ready.label'), hint: st(locale, 'card.need_template.ready.hint') },
+        { label: 'Cyberpunk glitch',   hint: st(locale, 'card.style.cyber.hint') },
+        { label: 'Swiss minimalist',   hint: st(locale, 'card.style.swiss.hint') },
+        { label: 'Warm-grain magazine',hint: st(locale, 'card.style.warm.hint') },
+        { label: 'Mono brutalist',     hint: st(locale, 'card.style.brutal.hint') },
       ],
       allow_freeform: true,
     }, null, 2));
@@ -2510,7 +2527,7 @@ function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
       : (inputs.pickedType ?? '');
     const isMulti = !!pickedType && isMultiFrameType(pickedType);
     const defaults = {
-      aspect:      pre.aspect      ?? '16:9 横屏',
+      aspect:      pre.aspect      ?? aspectValue(locale, '16:9'),
       duration:    pre.duration    ?? (isMulti ? '15' : '5'),
       frame_count: pre.frame_count ?? (isMulti ? '4' : '1'),
       // Per-frame pacing default 4s — comfortable, avoids the "rushed" feel a
@@ -2530,16 +2547,16 @@ function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
     p.push('```hv-form');
     p.push(JSON.stringify({
       meta: { phase: 'format' },
-      title: isEdit ? '改一下格式' : (isMulti ? '最后一步：尺寸 / 每帧时长 / 帧数' : '最后一步：选个尺寸 / 时长'),
+      title: isEdit ? st(locale, 'format.title_edit') : (isMulti ? st(locale, 'format.title_multi') : st(locale, 'format.title_single')),
       fields: [
         {
-          key: 'aspect', label: '画面尺寸', kind: 'buttons', required: true,
+          key: 'aspect', label: st(locale, 'format.aspect.label'), kind: 'buttons', required: true,
           default: defaults.aspect,
           options: [
-            { value: '16:9 横屏',     label: '16:9 横屏' },
-            { value: '9:16 手机竖屏', label: '9:16 竖屏' },
-            { value: '1:1 方形',      label: '1:1 方形' },
-            { value: '4:5 小红书',    label: '4:5 小红书' },
+            { value: aspectValue(locale, '16:9'), label: aspectValue(locale, '16:9') },
+            { value: aspectValue(locale, '9:16'), label: aspectValue(locale, '9:16') },
+            { value: aspectValue(locale, '1:1'), label: aspectValue(locale, '1:1') },
+            { value: aspectValue(locale, '4:5'), label: aspectValue(locale, '4:5') },
           ],
         },
         // Multi-frame: pace by PER-FRAME duration (total = per_frame × frames,
@@ -2547,20 +2564,20 @@ function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
         ...(isMulti
           ? [
               {
-                key: 'per_frame', label: '每帧时长 (秒)', kind: 'buttons', required: true,
+                key: 'per_frame', label: st(locale, 'format.per_frame.label'), kind: 'buttons', required: true,
                 default: defaults.per_frame,
-                hint: '总时长 = 每帧时长 × 帧数',
+                hint: st(locale, 'format.per_frame.hint'),
                 options: ['2', '3', '4', '5', '6', '8'].map((v) => ({ value: v, label: `${v}s` })),
               },
               {
-                key: 'frame_count', label: '帧数', kind: 'buttons', required: true,
+                key: 'frame_count', label: st(locale, 'format.frame_count.label'), kind: 'buttons', required: true,
                 default: defaults.frame_count,
                 options: ['2', '3', '4', '5', '6', '7', '8', '9', '10'].map((v) => ({ value: v, label: v })),
               },
             ]
           : [
               {
-                key: 'duration', label: '时长 (秒)', kind: 'buttons', required: true,
+                key: 'duration', label: st(locale, 'format.duration.label'), kind: 'buttons', required: true,
                 default: defaults.duration,
                 options: ['3', '5', '10', '15'].map((v) => ({ value: v, label: `${v}s` })),
               },
@@ -2581,14 +2598,17 @@ function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
     const pickedStyle = lastCardPickByPhase(history, 'style') ?? '';
     const contentTurns = collectContentTurns(history);
     const summaryRows: { label: string; value: string }[] = [];
-    if (pickedType) summaryRows.push({ label: '类型', value: pickedType });
+    if (pickedType) summaryRows.push({ label: st(locale, 'confirm.label.type'), value: pickedType });
     if (contentTurns.length > 0) {
-      summaryRows.push({ label: '内容', value: contentTurns.join(' · ').slice(0, 240) });
+      summaryRows.push({ label: st(locale, 'confirm.label.content'), value: contentTurns.join(' · ').slice(0, 240) });
     }
-    if (pickedStyle) summaryRows.push({ label: '风格', value: pickedStyle });
-    if (tmpl) summaryRows.push({ label: '模板', value: tmpl.name });
+    if (pickedStyle) summaryRows.push({ label: st(locale, 'confirm.label.style'), value: pickedStyle });
+    if (tmpl) summaryRows.push({ label: st(locale, 'confirm.label.template'), value: tmpl.name });
     const labelMap: Record<string, string> = {
-      aspect: '尺寸', duration: '时长', frame_count: '帧数', per_frame: '每帧时长',
+      aspect: st(locale, 'confirm.label.aspect'),
+      duration: st(locale, 'confirm.label.duration'),
+      frame_count: st(locale, 'confirm.label.frame_count'),
+      per_frame: st(locale, 'confirm.label.per_frame'),
     };
     // When pacing by per-frame, show per-frame + frames + derived total.
     const pf = Number(collected.per_frame ?? '') || 0;
@@ -2599,10 +2619,10 @@ function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
     }
     if (pf > 0) {
       const frames = Number(collected.frame_count ?? '4') || 4;
-      summaryRows.push({ label: '总时长', value: `${pf * frames}s` });
+      summaryRows.push({ label: st(locale, 'confirm.label.total'), value: `${pf * frames}s` });
     }
     if (attachments.length > 0) {
-      summaryRows.push({ label: '素材', value: attachments.map((a) => a.filename).join(', ') });
+      summaryRows.push({ label: st(locale, 'confirm.label.attachments'), value: attachments.map((a) => a.filename).join(', ') });
     }
 
     const p: string[] = [];
@@ -2611,7 +2631,7 @@ function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
     p.push('```hv-confirm');
     p.push(JSON.stringify({
       meta: { phase: 'confirm' },
-      title: '按这些信息生成？',
+      title: st(locale, 'confirm.title'),
       summary: summaryRows,
       actions: ['generate', 'edit'],
     }, null, 2));
@@ -2639,7 +2659,7 @@ function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
     const pickedType = inputs.pickedType ?? '';
     const pickedStyle = inputs.pickedStyle ?? '';
     const contentTurns = inputs.contentTurns ?? [];
-    const aspect = ((collected.aspect ?? '16:9').split(/\s+/)[0] ?? '16:9'); // strip "16:9 横屏" → "16:9"
+    const aspect = ((collected.aspect ?? '16:9').split(/\s+/)[0] ?? '16:9'); // strip "16:9 landscape" → "16:9"
     const [w, h] = aspect.includes(':') ? aspect.split(':').map(Number) : [16, 9];
     const isMulti = isMultiFrameType(pickedType)
       || Number(collected.frame_count ?? '1') > 1
@@ -2659,7 +2679,7 @@ function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
     p.push(`Generate the HTML video file(s) the user just confirmed.`);
     p.push('');
     // Lock the subject to the user's opening request. The content turns below
-    // can be as thin as "随机" — without this the video drifts onto that literal
+    // can be as thin as "random" — without this the video drifts onto that literal
     // word (a "promote Open Design" request became a randomness explainer).
     if (openingTopic) {
       p.push(`VIDEO SUBJECT (LOCKED): the user opened with "${openingTopic}". The video MUST be about THIS subject.`);
@@ -2975,6 +2995,7 @@ interface SplitGenerateArgs {
   ctx: CliContext;
   projectId: string;
   projectDir: string;
+  locale: string;
   agentDef: import('@html-video/runtime').AgentDef;
   agentModel?: string | undefined;
   tmpl: import('@html-video/core').TemplateMetadata | null;
@@ -2986,7 +3007,7 @@ interface SplitGenerateArgs {
   /**
    * Restyle mode: keep the EXISTING content-graph text verbatim and only
    * re-render each frame's HTML in the new style. Skips the Step-1 graph
-   * re-plan. Used by the post-generation "换风格 / 改时长" sub-flows.
+   * re-plan. Used by the post-generation "change style / change duration" sub-flows.
    */
   restyleOnly?: boolean;
   /** Called for human-readable progress lines. */
@@ -2997,14 +3018,14 @@ interface SplitGenerateArgs {
 
 // NOTE: the old classifyIterateIntent (LLM guesses rewrite-all/edit-visual/
 // edit-frame from one sentence) was removed. The post-generation flow no longer
-// guesses: detectPhase routes a vague "改一下" to an explicit edit-menu card
+// guesses: detectPhase routes a vague "change it a bit" to an explicit edit-menu card
 // (style / content / duration) and the user's pick drives restyle /
 // iterate-content / iterate-format.
 
 async function runSplitMultiFrameGenerate(
   args: SplitGenerateArgs,
 ): Promise<{ frameCount: number; intent: string }> {
-  const { ctx, projectId, projectDir, agentDef, agentModel, tmpl, priorHtml, inputs, attachments, openingTopic, restyleOnly, onProgress, onSse } = args;
+  const { ctx, projectId, projectDir, locale, agentDef, agentModel, tmpl, priorHtml, inputs, attachments, openingTopic, restyleOnly, onProgress, onSse } = args;
   const collected = inputs.collected ?? {};
   const pickedType = inputs.pickedType ?? '';
   const pickedStyle = inputs.pickedStyle ?? '';
@@ -3064,10 +3085,10 @@ async function runSplitMultiFrameGenerate(
       throw new Error('restyle requested but the project has no existing storyboard to reuse');
     }
     graph = existing as import('@html-video/content-graph').ContentGraph;
-    onProgress(`✓ 沿用现有文案：${graph.nodes.length} 帧`);
+    onProgress(st(locale, 'progress.keep_existing', graph.nodes.length));
     onSse({ type: 'plan_ready', frame_count: graph.nodes.length, intent: graph.intent });
   } else {
-  onProgress(`📋 规划 ${frameCountReq} 帧的故事板…`);
+  onProgress(st(locale, 'progress.planning', frameCountReq));
   const graphPromptParts: string[] = [];
   graphPromptParts.push(`Plan a ${frameCountReq}-frame HTML video storyboard. Output ONLY a content-graph JSON in a fenced \`\`\`json#content-graph block — no HTML, no prose outside.`);
   graphPromptParts.push('');
@@ -3075,7 +3096,7 @@ async function runSplitMultiFrameGenerate(
   graphPromptParts.push(`- 类型 / type: ${pickedType || '(unspecified)'} (this is the FORMAT, NOT the subject — never make the video be "about" the type itself)`);
   // Lock the storyboard to the user's opening subject (unless a SOURCE MATERIAL
   // block below supersedes it). This is the path the user actually hits, and
-  // where "随机" turned into a randomness explainer instead of the Open Design
+  // where "random" turned into a randomness explainer instead of the Open Design
   // promo they asked for.
   if (openingTopic && !attachments.some((a) => !!a.inlineText)) {
     graphPromptParts.push(`- 主题 / subject (LOCKED): the user opened with "${openingTopic}". The synopsis and EVERY node MUST be about this subject. If the content line below is a vague word like "随机 / 随便 / anything / 你定", it means "you choose the concrete angle and points — but keep the subject = "${openingTopic}"". NEVER make the video about randomness or the literal word.`);
@@ -3086,7 +3107,7 @@ async function runSplitMultiFrameGenerate(
   }
   // Inline the fetched article / repo / uploaded text — THIS is the subject of
   // the video. Without it the planner only sees the type word and invents a
-  // video "about 概念解说" instead of about the user's actual source.
+  // video "about concept explainer" instead of about the user's actual source.
   const { specs: designSpecs, content: contentAtts } = partitionAttachments(attachments);
   if (designSpecs.length > 0) graphPromptParts.push('', ...renderDesignSpecBlock(designSpecs));
   const sourceTexts = contentAtts.filter((a) => !!a.inlineText);
@@ -3144,7 +3165,7 @@ async function runSplitMultiFrameGenerate(
     throw new Error('graph has no nodes');
   }
   await ctx.orchestrator.writeContentGraph(projectId, graph);
-  onProgress(`✓ 故事板规划完成：${graph.nodes.length} 帧 (${graph.intent})`);
+  onProgress(st(locale, 'progress.storyboard_done', graph.nodes.length, graph.intent));
   onSse({ type: 'plan_ready', frame_count: graph.nodes.length, intent: graph.intent });
   }
 
@@ -3152,7 +3173,7 @@ async function runSplitMultiFrameGenerate(
   for (let i = 0; i < graph.nodes.length; i++) {
     const node = graph.nodes[i]!;
     const nodeId = node.id;
-    onProgress(`🎬 生成第 ${i + 1}/${graph.nodes.length} 帧 (${nodeId})…`);
+    onProgress(st(locale, 'progress.generating_frame', i, graph.nodes.length, nodeId));
     onSse({ type: 'frame_started', node_id: nodeId, order: i, total: graph.nodes.length });
 
     const frameContext = describeNode(node);
@@ -3234,7 +3255,7 @@ h1{font-size:8vw;letter-spacing:-.03em;animation:in 1s ease forwards;opacity:0;t
 
     // One retry on empty: shorter prompt, just the skeleton call.
     if (!extracted) {
-      onProgress(`  ↻ 第 ${i + 1} 帧首试为空，重试…`);
+      onProgress(st(locale, 'progress.frame_empty_retry', i));
       const retryPrompt = `Output ONE complete HTML video frame in a fenced \`\`\`html block. Frame purpose: ${frameContext}. Style: ${styleLabel || 'tasteful default'}. Resolution: ${resolution}. ${contentTurns.length ? `Content: ${contentTurns.join(' / ').slice(0, 200)}` : ''} \n\nBegin your reply with \`\`\`html. Inline CSS, opens with animation, tag text with data-hv-text. No prose.`;
       frameText = await callAgentSimple(agentDef, retryPrompt, projectDir, agentModel);
       extracted = /```html\s*\n([\s\S]*?)```/i.exec(frameText)?.[1]?.trim()
@@ -3244,7 +3265,7 @@ h1{font-size:8vw;letter-spacing:-.03em;animation:in 1s ease forwards;opacity:0;t
       throw new Error(`frame "${nodeId}" generation returned empty (${frameText.length}B)`);
     }
     await ctx.orchestrator.writeFrameHtml(projectId, nodeId, extracted);
-    onProgress(`  ✓ 第 ${i + 1}/${graph.nodes.length} 帧完成 (${nodeId})`);
+    onProgress(st(locale, 'progress.frame_done', i, graph.nodes.length, nodeId));
     onSse({ type: 'frame_done', node_id: nodeId, order: i, total: graph.nodes.length });
   }
 
