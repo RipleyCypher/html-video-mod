@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import type { CliContext } from './context.js';
-import { AssetStore, generateTts, generateMusic } from '@html-video/core';
+import { AssetStore, generateTts, generateMusic, generateWavespeedMusic, generateGeminiTts } from '@html-video/core';
 import { extractUrls, fetchSource } from './fetch-source.js';
 import { detectAll, findAgent, spawnAgent } from '@html-video/runtime';
 import { st, aspectValue } from './server-i18n.js';
@@ -358,17 +358,36 @@ export async function startStudioServer(ctx: CliContext, port: number): Promise<
         return;
       }
 
-      // Generate soundtrack: background music (MiniMax music_generation) and/or
-      // narration (MiniMax t2a_v2). Streams SSE progress like export. The
-      // generated MP3s are stored as project assets; their ids land in
-      // project.soundtrack so exportMp4 mixes them in. Generation itself does
-      // NOT need ffmpeg — only the export-time mux does.
+      // Generate soundtrack: background music and/or narration.
+      // Supports multiple providers:
+      //   - Music: MiniMax (music-1.5) or WaveSpeed (Ace-Step 1.5)
+      //   - Narration: MiniMax (speech-02-turbo) or Gemini (Flash TTS)
+      // Streams SSE progress like export. The generated audio files are stored
+      // as project assets; their ids land in project.soundtrack so exportMp4
+      // mixes them in. Generation itself does NOT need ffmpeg — only the
+      // export-time mux does.
       const genAudioMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/generate-audio$/);
       if (genAudioMatch && genAudioMatch[1] && m === 'POST') {
         const projectId = genAudioMatch[1];
         const body = (await readBody(req)) as {
-          music?: { prompt?: string; instrumental?: boolean; volumeDb?: number };
-          narration?: { text?: string; voiceId?: string; volumeDb?: number; languageBoost?: string; byFrame?: Record<string, string> };
+          music?: {
+            prompt?: string;       // MiniMax
+            tags?: string;         // WaveSpeed (required)
+            lyrics?: string;       // WaveSpeed (optional, empty = instrumental)
+            duration?: number;     // WaveSpeed (5-240s)
+            instrumental?: boolean; // MiniMax
+            provider?: 'minimax' | 'wavespeed';
+            volumeDb?: number;
+          };
+          narration?: {
+            text?: string;
+            voiceId?: string;      // MiniMax
+            voiceName?: string;    // Gemini
+            languageBoost?: string; // MiniMax
+            provider?: 'minimax' | 'gemini';
+            volumeDb?: number;
+            byFrame?: Record<string, string>;
+          };
           fadeInSec?: number;
           fadeOutSec?: number;
         };
@@ -383,65 +402,129 @@ export async function startStudioServer(ctx: CliContext, port: number): Promise<
         };
         try {
           sse({ type: 'audio_started' });
-          const creds = ctx.mediaConfig.resolveMinimax();
-          if (!creds) {
-            sse({
-              type: 'audio_failed',
-              message:
-                'MiniMax API key not configured — add it in Settings → Audio (or set OD_MINIMAX_API_KEY).',
-            });
-            res.end();
-            return;
-          }
 
           const project = await ctx.orchestrator.load(projectId);
           const soundtrack = { ...(project.soundtrack ?? {}) };
-          const wantMusic = !!body.music?.prompt?.trim();
+
+          // Determine what to generate
+          const musicProvider = body.music?.provider ?? 'minimax';
+          const narrationProvider = body.narration?.provider ?? 'minimax';
+          const wantMusic = !!(body.music?.prompt?.trim() || body.music?.tags?.trim());
           const wantNarration = !!body.narration?.text?.trim();
           if (!wantMusic && !wantNarration) {
-            sse({ type: 'audio_failed', message: 'Nothing to generate — provide a music prompt and/or narration text.' });
+            sse({ type: 'audio_failed', message: 'Nothing to generate — provide a music prompt/tags and/or narration text.' });
             res.end();
             return;
           }
 
+          // ---- Music generation ----
           if (wantMusic) {
-            sse({ type: 'audio_progress', stage: 'music', message: 'generating background music…' });
-            const music = await generateMusic({
-              prompt: body.music!.prompt!.trim(),
-              instrumental: body.music!.instrumental ?? true,
-              creds,
-            });
-            const { asset } = await ctx.orchestrator.addBufferAsset(
-              projectId,
-              music.bytes,
-              music.ext,
-              `background music · ${body.music!.prompt!.trim().slice(0, 60)}`,
-            );
-            soundtrack.musicAssetId = asset.id;
-            soundtrack.musicPrompt = body.music!.prompt!.trim();
-            if (body.music!.volumeDb !== undefined) soundtrack.musicVolumeDb = body.music!.volumeDb;
-            sse({ type: 'audio_progress', stage: 'music', message: music.providerNote, asset_id: asset.id });
+            sse({ type: 'audio_progress', stage: 'music', message: `generating background music (${musicProvider})…` });
+
+            if (musicProvider === 'wavespeed') {
+              // WaveSpeed Ace-Step 1.5
+              const wsCreds = ctx.mediaConfig.resolveWavespeed();
+              if (!wsCreds) {
+                sse({ type: 'audio_failed', message: 'WaveSpeed API key not configured — add it in Settings → Audio (or set WAVESPEED_API_KEY).' });
+                res.end();
+                return;
+              }
+              const music = await generateWavespeedMusic({
+                tags: body.music!.tags?.trim() || body.music!.prompt!.trim(),
+                lyrics: body.music!.lyrics,
+                duration: body.music!.duration,
+                creds: wsCreds,
+              });
+              const { asset } = await ctx.orchestrator.addBufferAsset(
+                projectId,
+                music.bytes,
+                music.ext,
+                `background music · ${musicProvider} · ${(body.music!.tags || body.music!.prompt || '').trim().slice(0, 60)}`,
+              );
+              soundtrack.musicAssetId = asset.id;
+              soundtrack.musicPrompt = body.music!.tags?.trim() || body.music!.prompt?.trim();
+              if (body.music!.volumeDb !== undefined) soundtrack.musicVolumeDb = body.music!.volumeDb;
+              sse({ type: 'audio_progress', stage: 'music', message: music.providerNote, asset_id: asset.id });
+            } else {
+              // MiniMax (default)
+              const mmCreds = ctx.mediaConfig.resolveMinimax();
+              if (!mmCreds) {
+                sse({ type: 'audio_failed', message: 'MiniMax API key not configured — add it in Settings → Audio (or set OD_MINIMAX_API_KEY).' });
+                res.end();
+                return;
+              }
+              const music = await generateMusic({
+                prompt: body.music!.prompt!.trim(),
+                instrumental: body.music!.instrumental ?? true,
+                creds: mmCreds,
+              });
+              const { asset } = await ctx.orchestrator.addBufferAsset(
+                projectId,
+                music.bytes,
+                music.ext,
+                `background music · ${body.music!.prompt!.trim().slice(0, 60)}`,
+              );
+              soundtrack.musicAssetId = asset.id;
+              soundtrack.musicPrompt = body.music!.prompt!.trim();
+              if (body.music!.volumeDb !== undefined) soundtrack.musicVolumeDb = body.music!.volumeDb;
+              sse({ type: 'audio_progress', stage: 'music', message: music.providerNote, asset_id: asset.id });
+            }
           }
 
+          // ---- Narration generation ----
           if (wantNarration) {
-            sse({ type: 'audio_progress', stage: 'narration', message: 'generating narration…' });
-            const nar = await generateTts({
-              text: body.narration!.text!.trim(),
-              ...(body.narration!.voiceId !== undefined && { voiceId: body.narration!.voiceId }),
-              ...(body.narration!.languageBoost !== undefined && { languageBoost: body.narration!.languageBoost }),
-              creds,
-            });
-            const { asset } = await ctx.orchestrator.addBufferAsset(
-              projectId,
-              nar.bytes,
-              nar.ext,
-              `narration · ${body.narration!.text!.trim().slice(0, 60)}`,
-            );
-            soundtrack.narrationAssetId = asset.id;
-            soundtrack.narrationText = body.narration!.text!.trim();
-            if (body.narration!.byFrame) soundtrack.narrationByFrame = body.narration!.byFrame;
-            if (body.narration!.volumeDb !== undefined) soundtrack.narrationVolumeDb = body.narration!.volumeDb;
-            sse({ type: 'audio_progress', stage: 'narration', message: nar.providerNote, asset_id: asset.id });
+            sse({ type: 'audio_progress', stage: 'narration', message: `generating narration (${narrationProvider})…` });
+
+            if (narrationProvider === 'gemini') {
+              // Gemini Flash TTS
+              const gemCreds = ctx.mediaConfig.resolveGemini();
+              if (!gemCreds) {
+                sse({ type: 'audio_failed', message: 'Gemini API key not configured — add it in Settings → Audio (or set GEMINI_API_KEY).' });
+                res.end();
+                return;
+              }
+              const nar = await generateGeminiTts({
+                text: body.narration!.text!.trim(),
+                voiceName: body.narration!.voiceName,
+                creds: gemCreds,
+              });
+              const { asset } = await ctx.orchestrator.addBufferAsset(
+                projectId,
+                nar.bytes,
+                nar.ext,
+                `narration · ${narrationProvider} · ${body.narration!.text!.trim().slice(0, 60)}`,
+              );
+              soundtrack.narrationAssetId = asset.id;
+              soundtrack.narrationText = body.narration!.text!.trim();
+              if (body.narration!.byFrame) soundtrack.narrationByFrame = body.narration!.byFrame;
+              if (body.narration!.volumeDb !== undefined) soundtrack.narrationVolumeDb = body.narration!.volumeDb;
+              sse({ type: 'audio_progress', stage: 'narration', message: nar.providerNote, asset_id: asset.id });
+            } else {
+              // MiniMax (default)
+              const mmCreds = ctx.mediaConfig.resolveMinimax();
+              if (!mmCreds) {
+                sse({ type: 'audio_failed', message: 'MiniMax API key not configured — add it in Settings → Audio (or set OD_MINIMAX_API_KEY).' });
+                res.end();
+                return;
+              }
+              const nar = await generateTts({
+                text: body.narration!.text!.trim(),
+                ...(body.narration!.voiceId !== undefined && { voiceId: body.narration!.voiceId }),
+                ...(body.narration!.languageBoost !== undefined && { languageBoost: body.narration!.languageBoost }),
+                creds: mmCreds,
+              });
+              const { asset } = await ctx.orchestrator.addBufferAsset(
+                projectId,
+                nar.bytes,
+                nar.ext,
+                `narration · ${body.narration!.text!.trim().slice(0, 60)}`,
+              );
+              soundtrack.narrationAssetId = asset.id;
+              soundtrack.narrationText = body.narration!.text!.trim();
+              if (body.narration!.byFrame) soundtrack.narrationByFrame = body.narration!.byFrame;
+              if (body.narration!.volumeDb !== undefined) soundtrack.narrationVolumeDb = body.narration!.volumeDb;
+              sse({ type: 'audio_progress', stage: 'narration', message: nar.providerNote, asset_id: asset.id });
+            }
           }
 
           if (body.fadeInSec !== undefined) soundtrack.fadeInSec = body.fadeInSec;
@@ -580,6 +663,38 @@ export async function startStudioServer(ctx: CliContext, port: number): Promise<
       if (url.pathname === '/api/config/minimax' && m === 'DELETE') {
         ctx.mediaConfig.clearMinimax();
         return json(res, 200, ctx.mediaConfig.getMinimaxStatus());
+      }
+
+      // WaveSpeed audio API config (Ace-Step 1.5 music generation)
+      if (url.pathname === '/api/config/wavespeed' && m === 'GET') {
+        return json(res, 200, ctx.mediaConfig.getWavespeedStatus());
+      }
+      if (url.pathname === '/api/config/wavespeed' && m === 'POST') {
+        const body = (await readBody(req)) as { apiKey?: string; baseUrl?: string };
+        const key = (body.apiKey ?? '').trim();
+        if (!key) return json(res, 400, { error: 'apiKey is required' });
+        ctx.mediaConfig.setWavespeed(key, body.baseUrl);
+        return json(res, 200, ctx.mediaConfig.getWavespeedStatus());
+      }
+      if (url.pathname === '/api/config/wavespeed' && m === 'DELETE') {
+        ctx.mediaConfig.clearWavespeed();
+        return json(res, 200, ctx.mediaConfig.getWavespeedStatus());
+      }
+
+      // Gemini API config (Flash TTS voiceover)
+      if (url.pathname === '/api/config/gemini' && m === 'GET') {
+        return json(res, 200, ctx.mediaConfig.getGeminiStatus());
+      }
+      if (url.pathname === '/api/config/gemini' && m === 'POST') {
+        const body = (await readBody(req)) as { apiKey?: string };
+        const key = (body.apiKey ?? '').trim();
+        if (!key) return json(res, 400, { error: 'apiKey is required' });
+        ctx.mediaConfig.setGemini(key);
+        return json(res, 200, ctx.mediaConfig.getGeminiStatus());
+      }
+      if (url.pathname === '/api/config/gemini' && m === 'DELETE') {
+        ctx.mediaConfig.clearGemini();
+        return json(res, 200, ctx.mediaConfig.getGeminiStatus());
       }
 
       // Agents (detected on each call; cheap thanks to the in-process cache)

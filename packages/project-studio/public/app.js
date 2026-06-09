@@ -34,6 +34,19 @@ const NARRATION_VOICES = [
   { key: 'female_sweet',  voiceId: 'female-shaonv' },
 ];
 
+// Gemini Flash TTS voices — curated subset of 8 voices (4M + 4F).
+// `key` maps to a localized label (soundtrack.gemini_<key>).
+const GEMINI_VOICES = [
+  { key: 'male_informative', voiceName: 'Charon' },
+  { key: 'male_firm',        voiceName: 'Kore' },
+  { key: 'male_warm',        voiceName: 'Sulafat' },
+  { key: 'male_gravelly',    voiceName: 'Algenib' },
+  { key: 'female_bright',    voiceName: 'Zephyr' },
+  { key: 'female_breezy',    voiceName: 'Aoede' },
+  { key: 'female_youthful',  voiceName: 'Leda' },
+  { key: 'female_gentle',    voiceName: 'Vindemiatrix' },
+];
+
 const API = {
   projects: () => fetch('/api/projects').then(r => r.json()),
   createProject: b => fetch('/api/projects', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b) }).then(r => r.json()),
@@ -696,10 +709,21 @@ function renderMain() {
               <!-- ===== Background music: its own input + generate ===== -->
               <div class="st-section">
                 <div class="st-section-title">${t('soundtrack.music_label')}</div>
+                <div class="st-provider-row">
+                  <label class="st-provider-label">${t('soundtrack.music_provider')}</label>
+                  <select id="st-music-provider" class="st-provider-select">
+                    <option value="minimax">${t('soundtrack.provider_minimax')}</option>
+                    <option value="wavespeed">${t('soundtrack.provider_wavespeed')}</option>
+                  </select>
+                </div>
                 <div class="st-presets" id="st-music-presets">
                   ${MUSIC_PRESETS.map((p) => `<button type="button" class="st-preset" data-prompt="${p.prompt}">${t('soundtrack.preset_' + p.key)}</button>`).join('')}
                 </div>
                 <textarea id="st-music-prompt" rows="2" placeholder="${t('soundtrack.music_placeholder')}"></textarea>
+                <!-- WaveSpeed-specific: duration slider -->
+                <div class="st-wavespeed-options" id="st-wavespeed-options" style="display:none">
+                  <div class="st-vol-row"><label>${t('soundtrack.duration_label')} <input type="range" id="st-music-duration" min="5" max="240" value="60" /><b id="st-music-dur-val">60s</b></label></div>
+                </div>
                 <div class="st-vol-row"><label>${t('soundtrack.music_volume')} <input type="range" id="st-music-vol" min="-40" max="0" value="-18" /><b id="st-music-vol-val">-18 dB</b></label></div>
                 <div class="st-section-actions">
                   <button class="st-generate" id="btn-st-gen-music">${t('soundtrack.gen_music')}</button>
@@ -733,6 +757,13 @@ function renderMain() {
                   <div class="st-substep-head">
                     <span class="st-step-badge">2</span>
                     <span class="st-step-label">${t('soundtrack.step_voice')}</span>
+                  </div>
+                  <div class="st-provider-row">
+                    <label class="st-provider-label">${t('soundtrack.voice_provider')}</label>
+                    <select id="st-voice-provider" class="st-provider-select">
+                      <option value="minimax">${t('soundtrack.provider_minimax')}</option>
+                      <option value="gemini">${t('soundtrack.provider_gemini')}</option>
+                    </select>
                   </div>
                   <div class="st-voice-row">
                     <span class="st-voice-label">${t('soundtrack.voice_label')}</span>
@@ -842,6 +873,55 @@ function wireSoundtrackPanel() {
       btn.classList.add('active');
     };
   });
+
+  // ---- Provider selection handlers ----------------------------------------
+  const musicProviderSel = document.getElementById('st-music-provider');
+  const voiceProviderSel = document.getElementById('st-voice-provider');
+  const voiceSelect = document.getElementById('st-narration-voice');
+  const wavespeedOptions = document.getElementById('st-wavespeed-options');
+  const musicDurationSlider = document.getElementById('st-music-duration');
+  const musicDurationVal = document.getElementById('st-music-dur-val');
+
+  // Update voice list based on selected provider
+  function updateVoiceList(provider) {
+    if (!voiceSelect) return;
+    const voices = provider === 'gemini' ? GEMINI_VOICES : NARRATION_VOICES;
+    const prefix = provider === 'gemini' ? 'soundtrack.gemini_' : 'soundtrack.voice_';
+    const valueKey = provider === 'gemini' ? 'voiceName' : 'voiceId';
+    voiceSelect.innerHTML = voices.map((v) =>
+      `<option value="${v[valueKey]}">${t(prefix + v.key)}</option>`
+    ).join('');
+  }
+
+  // Music provider change: show/hide WaveSpeed-specific options
+  if (musicProviderSel) {
+    musicProviderSel.onchange = () => {
+      const provider = musicProviderSel.value;
+      if (wavespeedOptions) {
+        wavespeedOptions.style.display = provider === 'wavespeed' ? 'block' : 'none';
+      }
+      // Update placeholder for WaveSpeed (tags vs prompt)
+      if (musicPrompt) {
+        musicPrompt.placeholder = provider === 'wavespeed'
+          ? t('soundtrack.tags_placeholder')
+          : t('soundtrack.music_placeholder');
+      }
+    };
+  }
+
+  // Voice provider change: update voice dropdown
+  if (voiceProviderSel) {
+    voiceProviderSel.onchange = () => {
+      updateVoiceList(voiceProviderSel.value);
+    };
+  }
+
+  // Duration slider value display
+  if (musicDurationSlider && musicDurationVal) {
+    musicDurationSlider.oninput = () => {
+      musicDurationVal.textContent = `${musicDurationSlider.value}s`;
+    };
+  }
 
   // ---- Per-frame narration model ----------------------------------------
   // narrationByFrame: { [graphNodeId]: text }. The textarea always shows the
@@ -999,7 +1079,20 @@ function wireSoundtrackPanel() {
     if (kind === 'music') {
       const mp = musicPrompt.value.trim();
       if (!mp) { if (statusEl) statusEl.textContent = t('soundtrack.empty_music'); return; }
-      payload.music = { prompt: mp, instrumental: true, volumeDb: Number(musicVol.value) };
+      const musicProvider = musicProviderSel?.value || 'minimax';
+      payload.music = {
+        provider: musicProvider,
+        volumeDb: Number(musicVol.value),
+      };
+      if (musicProvider === 'wavespeed') {
+        // WaveSpeed uses tags (required) and optional duration
+        payload.music.tags = mp;
+        payload.music.duration = Number(musicDurationSlider?.value || 60);
+      } else {
+        // MiniMax uses prompt and instrumental flag
+        payload.music.prompt = mp;
+        payload.music.instrumental = true;
+      }
     } else {
       // Stitch every frame's line in order into one narration track.
       const stitched = sortedFrames
@@ -1008,7 +1101,20 @@ function wireSoundtrackPanel() {
       const nt = stitched || narrationText.value.trim();
       if (!nt) { if (statusEl) statusEl.textContent = t('soundtrack.empty_narration'); return; }
       const voiceSel = document.getElementById('st-narration-voice');
-      payload.narration = { text: nt, volumeDb: Number(narrationVol.value), byFrame: state._narrationByFrame, ...(voiceSel?.value && { voiceId: voiceSel.value }) };
+      const voiceProvider = voiceProviderSel?.value || 'minimax';
+      payload.narration = {
+        provider: voiceProvider,
+        text: nt,
+        volumeDb: Number(narrationVol.value),
+        byFrame: state._narrationByFrame,
+      };
+      if (voiceProvider === 'gemini') {
+        // Gemini uses voiceName
+        if (voiceSel?.value) payload.narration.voiceName = voiceSel.value;
+      } else {
+        // MiniMax uses voiceId
+        if (voiceSel?.value) payload.narration.voiceId = voiceSel.value;
+      }
     }
 
     const label = btn?.textContent;
@@ -2823,90 +2929,152 @@ async function renderSettingsAudio(panel) {
   panel.innerHTML = `
     <h3>${esc(t('settings.audio.title'))}</h3>
     <div class="panel-sub">${esc(t('settings.audio.subtitle'))}</div>
-    <div class="audio-config" id="audio-config">
-      <div class="audio-status" id="audio-status">${esc(t('settings.audio.loading'))}</div>
-      <label class="audio-field">
-        <span>${esc(t('settings.audio.api_key'))}</span>
-        <input type="password" id="mm-api-key" placeholder="${esc(t('settings.audio.api_key_placeholder'))}" autocomplete="off" />
-      </label>
-      <label class="audio-field">
-        <span>${esc(t('settings.audio.region'))}</span>
-        <div class="audio-region" id="mm-region">
-          <button type="button" class="st-preset" data-url="https://api.minimax.io/v1">${esc(t('settings.audio.region_intl'))}</button>
-          <button type="button" class="st-preset" data-url="https://api.minimaxi.com/v1">${esc(t('settings.audio.region_cn'))}</button>
+
+    <!-- MiniMax -->
+    <div class="audio-provider-section" id="minimax-section">
+      <h4>${esc(t('settings.audio.minimax.title'))}</h4>
+      <div class="panel-sub">${esc(t('settings.audio.minimax.subtitle'))}</div>
+      <div class="audio-config">
+        <div class="audio-status" id="minimax-status">${esc(t('settings.audio.loading'))}</div>
+        <label class="audio-field">
+          <span>${esc(t('settings.audio.api_key'))}</span>
+          <input type="password" id="minimax-api-key" placeholder="${esc(t('settings.audio.minimax.api_key_placeholder'))}" autocomplete="off" />
+        </label>
+        <label class="audio-field">
+          <span>${esc(t('settings.audio.minimax.region'))}</span>
+          <div class="audio-region" id="minimax-region">
+            <button type="button" class="st-preset" data-url="https://api.minimax.io/v1">${esc(t('settings.audio.minimax.region_intl'))}</button>
+            <button type="button" class="st-preset" data-url="https://api.minimaxi.com/v1">${esc(t('settings.audio.minimax.region_cn'))}</button>
+          </div>
+        </label>
+        <label class="audio-field">
+          <span>${esc(t('settings.audio.minimax.base_url'))}</span>
+          <input type="text" id="minimax-base-url" placeholder="https://api.minimax.io/v1" autocomplete="off" />
+        </label>
+        <div class="audio-actions">
+          <button class="audio-save primary-action" id="minimax-save" style="background:var(--accent);border-color:var(--accent);color:var(--accent-fg)">${esc(t('settings.audio.save'))}</button>
+          <button class="audio-clear" id="minimax-clear">${esc(t('settings.audio.clear'))}</button>
+          <span class="audio-save-state" id="minimax-save-state"></span>
         </div>
-      </label>
-      <label class="audio-field">
-        <span>${esc(t('settings.audio.base_url'))}</span>
-        <input type="text" id="mm-base-url" placeholder="https://api.minimax.io/v1" autocomplete="off" />
-      </label>
-      <div class="audio-actions">
-        <button class="audio-save primary-action" id="mm-save" style="background:var(--accent);border-color:var(--accent);color:var(--accent-fg)">${esc(t('settings.audio.save'))}</button>
-        <button class="audio-clear" id="mm-clear">${esc(t('settings.audio.clear'))}</button>
-        <span class="audio-save-state" id="mm-save-state"></span>
+        <p class="panel-sub" style="font-size:11.5px;margin-top:4px">${esc(t('settings.audio.minimax.hint'))}</p>
       </div>
-      <p class="panel-sub" style="font-size:11.5px;margin-top:4px">${esc(t('settings.audio.hint'))}</p>
+    </div>
+
+    <!-- WaveSpeed -->
+    <div class="audio-provider-section" id="wavespeed-section" style="margin-top:24px">
+      <h4>${esc(t('settings.audio.wavespeed.title'))}</h4>
+      <div class="panel-sub">${esc(t('settings.audio.wavespeed.subtitle'))}</div>
+      <div class="audio-config">
+        <div class="audio-status" id="wavespeed-status">${esc(t('settings.audio.loading'))}</div>
+        <label class="audio-field">
+          <span>${esc(t('settings.audio.api_key'))}</span>
+          <input type="password" id="wavespeed-api-key" placeholder="${esc(t('settings.audio.wavespeed.api_key_placeholder'))}" autocomplete="off" />
+        </label>
+        <label class="audio-field">
+          <span>${esc(t('settings.audio.wavespeed.base_url'))}</span>
+          <input type="text" id="wavespeed-base-url" placeholder="https://api.wavespeed.ai/api/v3" autocomplete="off" />
+        </label>
+        <div class="audio-actions">
+          <button class="audio-save primary-action" id="wavespeed-save" style="background:var(--accent);border-color:var(--accent);color:var(--accent-fg)">${esc(t('settings.audio.save'))}</button>
+          <button class="audio-clear" id="wavespeed-clear">${esc(t('settings.audio.clear'))}</button>
+          <span class="audio-save-state" id="wavespeed-save-state"></span>
+        </div>
+        <p class="panel-sub" style="font-size:11.5px;margin-top:4px">${esc(t('settings.audio.wavespeed.hint'))}</p>
+      </div>
+    </div>
+
+    <!-- Gemini -->
+    <div class="audio-provider-section" id="gemini-section" style="margin-top:24px">
+      <h4>${esc(t('settings.audio.gemini.title'))}</h4>
+      <div class="panel-sub">${esc(t('settings.audio.gemini.subtitle'))}</div>
+      <div class="audio-config">
+        <div class="audio-status" id="gemini-status">${esc(t('settings.audio.loading'))}</div>
+        <label class="audio-field">
+          <span>${esc(t('settings.audio.api_key'))}</span>
+          <input type="password" id="gemini-api-key" placeholder="${esc(t('settings.audio.gemini.api_key_placeholder'))}" autocomplete="off" />
+        </label>
+        <div class="audio-actions">
+          <button class="audio-save primary-action" id="gemini-save" style="background:var(--accent);border-color:var(--accent);color:var(--accent-fg)">${esc(t('settings.audio.save'))}</button>
+          <button class="audio-clear" id="gemini-clear">${esc(t('settings.audio.clear'))}</button>
+          <span class="audio-save-state" id="gemini-save-state"></span>
+        </div>
+        <p class="panel-sub" style="font-size:11.5px;margin-top:4px">${esc(t('settings.audio.gemini.hint'))}</p>
+      </div>
     </div>
   `;
 
-  const statusEl = panel.querySelector('#audio-status');
-  const keyInput = panel.querySelector('#mm-api-key');
-  const baseInput = panel.querySelector('#mm-base-url');
-  const saveState = panel.querySelector('#mm-save-state');
+  // Helper to wire up a provider section
+  function wireProviderSection(provider, hasBaseUrl, hasRegion) {
+    const statusEl = panel.querySelector(`#${provider}-status`);
+    const keyInput = panel.querySelector(`#${provider}-api-key`);
+    const baseInput = panel.querySelector(`#${provider}-base-url`);
+    const saveState = panel.querySelector(`#${provider}-save-state`);
+    const notConfiguredKey = `settings.audio.${provider}.not_configured`;
 
-  const refresh = async () => {
-    try {
-      const s = await fetch('/api/config/minimax').then((r) => r.json());
-      if (s.configured) {
-        const src = s.source === 'env' ? t('settings.audio.source_env') : t('settings.audio.source_config');
-        statusEl.innerHTML = `<span class="agent-status-dot ok"></span>${esc(t('settings.audio.configured', { key: s.maskedKey, source: src }))}`;
-        if (s.baseUrl) baseInput.value = s.baseUrl;
-      } else {
-        statusEl.innerHTML = `<span class="agent-status-dot missing"></span>${esc(t('settings.audio.not_configured'))}`;
+    const refresh = async () => {
+      try {
+        const s = await fetch(`/api/config/${provider}`).then((r) => r.json());
+        if (s.configured) {
+          const src = s.source === 'env' ? t('settings.audio.source_env') : t('settings.audio.source_config');
+          statusEl.innerHTML = `<span class="agent-status-dot ok"></span>${esc(t('settings.audio.configured', { key: s.maskedKey, source: src }))}`;
+          if (hasBaseUrl && s.baseUrl && baseInput) baseInput.value = s.baseUrl;
+        } else {
+          statusEl.innerHTML = `<span class="agent-status-dot missing"></span>${esc(t(notConfiguredKey))}`;
+        }
+      } catch {
+        statusEl.textContent = t(notConfiguredKey);
       }
-    } catch {
-      statusEl.textContent = t('settings.audio.not_configured');
-    }
-  };
-  await refresh();
-
-  // Region quick-pick: fills the Base URL with the correct regional endpoint.
-  // MiniMax keys are region-bound (an api.minimax.io key won't auth against
-  // api.minimaxi.com and vice-versa), so picking the wrong region is the #1
-  // cause of voiceover failures (issue #4).
-  panel.querySelectorAll('#mm-region .st-preset').forEach((btn) => {
-    btn.onclick = () => {
-      baseInput.value = btn.dataset.url;
-      panel.querySelectorAll('#mm-region .st-preset').forEach((b) => b.classList.toggle('active', b === btn));
     };
-  });
 
-  panel.querySelector('#mm-save').onclick = async () => {
-    const apiKey = keyInput.value.trim();
-    if (!apiKey) { saveState.textContent = t('settings.audio.need_key'); return; }
-    saveState.textContent = t('settings.audio.saving');
-    try {
-      const r = await fetch('/api/config/minimax', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ apiKey, baseUrl: baseInput.value.trim() }),
+    // Region quick-pick for MiniMax
+    if (hasRegion) {
+      panel.querySelectorAll(`#${provider}-region .st-preset`).forEach((btn) => {
+        btn.onclick = () => {
+          if (baseInput) {
+            baseInput.value = btn.dataset.url;
+            panel.querySelectorAll(`#${provider}-region .st-preset`).forEach((b) => b.classList.toggle('active', b === btn));
+          }
+        };
       });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      keyInput.value = '';
-      saveState.textContent = t('settings.audio.saved');
-      await refresh();
-    } catch (e) {
-      saveState.textContent = t('settings.audio.save_failed', { message: (e?.message ?? e) });
     }
-  };
 
-  panel.querySelector('#mm-clear').onclick = async () => {
-    await fetch('/api/config/minimax', { method: 'DELETE' });
-    keyInput.value = '';
-    baseInput.value = '';
-    saveState.textContent = '';
-    await refresh();
-  };
+    panel.querySelector(`#${provider}-save`).onclick = async () => {
+      const apiKey = keyInput.value.trim();
+      if (!apiKey) { saveState.textContent = t('settings.audio.need_key'); return; }
+      saveState.textContent = t('settings.audio.saving');
+      try {
+        const body = { apiKey };
+        if (hasBaseUrl && baseInput) body.baseUrl = baseInput.value.trim();
+        const r = await fetch(`/api/config/${provider}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        keyInput.value = '';
+        saveState.textContent = t('settings.audio.saved');
+        await refresh();
+      } catch (e) {
+        saveState.textContent = t('settings.audio.save_failed', { message: (e?.message ?? e) });
+      }
+    };
+
+    panel.querySelector(`#${provider}-clear`).onclick = async () => {
+      await fetch(`/api/config/${provider}`, { method: 'DELETE' });
+      keyInput.value = '';
+      if (baseInput) baseInput.value = '';
+      saveState.textContent = '';
+      await refresh();
+    };
+
+    return refresh;
+  }
+
+  const refreshMinimax = wireProviderSection('minimax', true, true);
+  const refreshWavespeed = wireProviderSection('wavespeed', true, false);
+  const refreshGemini = wireProviderSection('gemini', false, false);
+
+  await Promise.all([refreshMinimax(), refreshWavespeed(), refreshGemini()]);
 }
 
 function renderSettingsAgent(panel) {

@@ -19,3 +19,21 @@ export {
   generateMusic,
 } from './minimax.js';
 export type { MinimaxCredentials, MinimaxAudioResult } from './minimax.js';
+export {
+  resolveWavespeedCredentials,
+  generateWavespeedMusic,
+} from './wavespeed.js';
+export type {
+  WavespeedCredentials,
+  WavespeedMusicResult,
+} from './wavespeed.js';
+export {
+  GEMINI_VOICES,
+  resolveGeminiCredentials,
+  generateGeminiTts,
+} from './gemini-tts.js';
+export type {
+  GeminiVoiceKey,
+  GeminiCredentials,
+  GeminiTtsResult,
+} from './gemini-tts.js';

@@ -14,10 +14,19 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { resolveMinimaxCredentials, type MinimaxCredentials } from '@html-video/core';
+import {
+  resolveMinimaxCredentials,
+  type MinimaxCredentials,
+  resolveWavespeedCredentials,
+  type WavespeedCredentials,
+  resolveGeminiCredentials,
+  type GeminiCredentials,
+} from '@html-video/core';
 
 interface MediaConfig {
   minimax?: { apiKey?: string; baseUrl?: string };
+  wavespeed?: { apiKey?: string; baseUrl?: string };
+  gemini?: { apiKey?: string };
 }
 
 export class MediaConfigStore {
@@ -85,6 +94,77 @@ export class MediaConfigStore {
       return { apiKey: cfg.apiKey, baseUrl };
     }
     return resolveMinimaxCredentials();
+  }
+
+  // ---- WaveSpeed (Ace-Step 1.5 music) ----
+
+  getWavespeedStatus(): { configured: boolean; source: 'config' | 'env' | 'none'; maskedKey: string; baseUrl: string } {
+    const cfg = this.read().wavespeed;
+    if (cfg?.apiKey) {
+      return { configured: true, source: 'config', maskedKey: mask(cfg.apiKey), baseUrl: cfg.baseUrl ?? '' };
+    }
+    const env = resolveWavespeedCredentials();
+    if (env) {
+      return { configured: true, source: 'env', maskedKey: mask(env.apiKey), baseUrl: env.baseUrl };
+    }
+    return { configured: false, source: 'none', maskedKey: '', baseUrl: '' };
+  }
+
+  setWavespeed(apiKey: string, baseUrl?: string): void {
+    const cfg = this.read();
+    cfg.wavespeed = { apiKey: apiKey.trim() };
+    const b = (baseUrl ?? '').trim();
+    if (b) cfg.wavespeed.baseUrl = b;
+    this.write(cfg);
+  }
+
+  clearWavespeed(): void {
+    const cfg = this.read();
+    delete cfg.wavespeed;
+    this.write(cfg);
+  }
+
+  resolveWavespeed(): WavespeedCredentials | null {
+    const cfg = this.read().wavespeed;
+    if (cfg?.apiKey) {
+      const baseUrl = (cfg.baseUrl || '').trim().replace(/\/$/, '') || 'https://api.wavespeed.ai/api/v3';
+      return { apiKey: cfg.apiKey, baseUrl };
+    }
+    return resolveWavespeedCredentials();
+  }
+
+  // ---- Gemini (Flash TTS voiceover) ----
+
+  getGeminiStatus(): { configured: boolean; source: 'config' | 'env' | 'none'; maskedKey: string } {
+    const cfg = this.read().gemini;
+    if (cfg?.apiKey) {
+      return { configured: true, source: 'config', maskedKey: mask(cfg.apiKey) };
+    }
+    const env = resolveGeminiCredentials();
+    if (env) {
+      return { configured: true, source: 'env', maskedKey: mask(env.apiKey) };
+    }
+    return { configured: false, source: 'none', maskedKey: '' };
+  }
+
+  setGemini(apiKey: string): void {
+    const cfg = this.read();
+    cfg.gemini = { apiKey: apiKey.trim() };
+    this.write(cfg);
+  }
+
+  clearGemini(): void {
+    const cfg = this.read();
+    delete cfg.gemini;
+    this.write(cfg);
+  }
+
+  resolveGemini(): GeminiCredentials | null {
+    const cfg = this.read().gemini;
+    if (cfg?.apiKey) {
+      return { apiKey: cfg.apiKey };
+    }
+    return resolveGeminiCredentials();
   }
 }
 
